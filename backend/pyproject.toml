@@ -42,6 +42,10 @@ gpu = [
     "sentence-transformers>=3.0.0",
     "FlagEmbedding>=1.2.10",
     "torch>=2.2.0",
+    # transformers 必须锁 4.x：FlagEmbedding 1.4.0 的 FlagReranker.compute_score
+    # 内部调用 XLMRobertaTokenizer.prepare_for_model，该方法在 transformers 5.x 已移除
+    # 详见 backend/app/services/retrieval/reranker.py
+    "transformers>=4.57,<5",
 ]
 # 评测依赖（P6 用）
 eval = [
