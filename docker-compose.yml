@@ -1,0 +1,173 @@
+# Graduate RAG - 基础设施编排
+# 启动：make up  停止：make down
+#
+# 端口规划（避开 Dify 占用的 80/443/3000/5001/5432 等）：
+#   backend  18000  (宿主机) → 8000 (容器内)
+#   postgres 15432  (宿主机) → 5432 (容器内)
+#   minio    19000/19001 (宿主机) → 9000/9001 (容器内)
+#   milvus   19530/9091 (宿主机) → 同 (容器内)
+services:
+  # ─────────────────────────────────────────────
+  # Milvus 依赖：etcd（元数据）+ minio（对象存储）
+  # ─────────────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: grad-rag-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+    container_name: grad-rag-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "19000:9000"   # S3 API
+      - "19001:9001"   # 控制台
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.4.13
+    container_name: grad-rag-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_REGION: minio
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+      KNOWHERE_LOG_LEVEL: warn
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL：元数据/用户/会话/wiki
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: grad-rag-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-grad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grad123}
+      POSTGRES_DB: ${POSTGRES_DB:-grad_rag}
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-grad} -d ${POSTGRES_DB:-grad_rag}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # 后端 FastAPI
+  # 宿主机 18000 → 容器 8000（8000 被本机其他进程占用，故前移）
+  # ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: grad-rag-backend
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "18000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./infra:/app/infra:ro
+      - ../output:/data/output:ro
+      - mineru_cache:/data/mineru_cache
+      - huggingface_cache:/root/.cache/huggingface
+      - ./models:/models          # BGE-M3 模型缓存（首次下载后持久化，约 2.4GB）
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    # GPU 支持（GTX 1660 SUPER 6GB，BGE-M3 需 ~2.4GB 显存）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # 前端 Next.js
+  # 宿主机 3000 → 容器 3000
+  # 通过 next.config.js rewrites 转发 /api/* 到 backend:8000
+  # ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: grad-rag-frontend
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://backend:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  postgres_data:
+  mineru_cache:
+  huggingface_cache:

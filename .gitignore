@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# venv
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 环境变量（含真实 API key，严禁入库）
+.env
+.env.local
+.env.*.local
+
+# 日志
+logs/
+*.log
+
+# Docker volume 数据
+data/
+mineru_cache/
+huggingface_cache/
+
+# 模型权重（reranker/embedder，体积大，不入库）
+models/
+
+# 前端依赖与构建产物
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# 误生成的临时文件（pip 命令错误产物）
+backend/=*
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Trae
+.trae/
