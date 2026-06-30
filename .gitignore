@@ -45,6 +45,7 @@ models/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+frontend/.npm-cache/
 
 # 误生成的临时文件（pip 命令错误产物）
 backend/=*

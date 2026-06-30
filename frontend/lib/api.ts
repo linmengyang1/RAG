@@ -148,6 +148,98 @@ export async function chatApi(req: ChatRequest): Promise<ChatResponse> {
   return resp.json();
 }
 
+// ───── SSE 流式问答回调 ─────
+export interface ChatStreamCallbacks {
+  onIntent: (intent: string, rewrittenQuery: string) => void;
+  onRetrieving: () => void;
+  onRetrieved: (count: number) => void;
+  onGenerating: () => void;
+  onToken: (delta: string) => void;
+  onDone: (data: {
+    conversation_id: number;
+    intent: string;
+    rewritten_query: string;
+    answer: string;
+    sources: ChatSource[];
+  }) => void;
+  onError: (msg: string) => void;
+}
+
+/**
+ * 流式问答：SSE 分阶段推送，实时显示思考过程
+ *
+ * 事件流：intent_done → retrieving → retrieved → generating → token(多次) → done
+ */
+export async function chatStreamApi(
+  req: ChatRequest,
+  callbacks: ChatStreamCallbacks
+): Promise<void> {
+  const resp = await fetch("/api/v1/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok || !resp.body) {
+    throw new Error(`问答失败: ${resp.status} ${await resp.text()}`);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE 事件帧以空行（\n\n）分隔
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() || ""; // 最后一个可能不完整，留到下次
+
+    for (const frame of frames) {
+      const lines = frame.split("\n");
+      let event = "";
+      let data = "";
+      for (const line of lines) {
+        if (line.startsWith("event: ")) event = line.slice(7);
+        else if (line.startsWith("data: ")) data = line.slice(6);
+      }
+      if (!event) continue;
+
+      let parsed: any = {};
+      try {
+        parsed = data ? JSON.parse(data) : {};
+      } catch {
+        continue;
+      }
+
+      switch (event) {
+        case "intent_done":
+          callbacks.onIntent(parsed.intent, parsed.rewritten_query);
+          break;
+        case "retrieving":
+          callbacks.onRetrieving();
+          break;
+        case "retrieved":
+          callbacks.onRetrieved(parsed.sources_count);
+          break;
+        case "generating":
+          callbacks.onGenerating();
+          break;
+        case "token":
+          callbacks.onToken(parsed.delta);
+          break;
+        case "done":
+          callbacks.onDone(parsed);
+          break;
+        case "error":
+          callbacks.onError(parsed.detail || "未知错误");
+          break;
+      }
+    }
+  }
+}
+
 /**
  * Wiki 列表
  */

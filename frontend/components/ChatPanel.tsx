@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import ResultCard from "./ResultCard";
-import { chatApi, type ChatSource } from "@/lib/api";
+import { chatStreamApi, type ChatSource } from "@/lib/api";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -11,6 +11,26 @@ interface ChatMessage {
   intent?: string;
   sources?: ChatSource[];
   conversation_id?: number;
+  // 流式思考阶段：intent / intent_done / retrieving / retrieved / generating / done / error
+  stage?: string;
+}
+
+// 阶段提示文本
+function stageText(stage?: string): string {
+  switch (stage) {
+    case "intent":
+      return "意图识别中...";
+    case "intent_done":
+      return "意图识别完成";
+    case "retrieving":
+      return "检索中（向量 + 关键词双路 RRF + rerank）...";
+    case "retrieved":
+      return "检索完成，准备生成...";
+    case "generating":
+      return "生成中...";
+    default:
+      return "";
+  }
 }
 
 export default function ChatPanel() {
@@ -26,7 +46,13 @@ export default function ChatPanel() {
   async function handleSend() {
     if (!input.trim()) return;
     const userMsg: ChatMessage = { role: "user", content: input };
-    setMessages((prev) => [...prev, userMsg]);
+    // 占位 assistant message，流式回调会逐步更新它
+    const assistantIdx = messages.length + 1;
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      { role: "assistant", content: "", stage: "intent" },
+    ]);
     setLoading(true);
     setError("");
 
@@ -34,34 +60,99 @@ export default function ChatPanel() {
     setInput("");
 
     try {
-      const resp = await chatApi({
-        question: currentInput,
-        top_k: topK,
-        conversation_id: conversationId ?? undefined,
-        enable_rerank: enableRerank,
-        enable_wiki: enableWiki,
-      });
-      setConversationId(resp.conversation_id);
-      setMessages((prev) => [
-        ...prev,
+      await chatStreamApi(
         {
-          role: "assistant",
-          content: resp.answer,
-          rewritten_query: resp.rewritten_query,
-          intent: resp.intent,
-          sources: resp.sources,
-          conversation_id: resp.conversation_id,
+          question: currentInput,
+          top_k: topK,
+          conversation_id: conversationId ?? undefined,
+          enable_rerank: enableRerank,
+          enable_wiki: enableWiki,
         },
-      ]);
+        {
+          onIntent: (intent, rewrittenQuery) => {
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                intent,
+                rewritten_query: rewrittenQuery,
+                stage: "intent_done",
+              };
+              return next;
+            });
+          },
+          onRetrieving: () => {
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = { ...next[assistantIdx], stage: "retrieving" };
+              return next;
+            });
+          },
+          onRetrieved: () => {
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = { ...next[assistantIdx], stage: "retrieved" };
+              return next;
+            });
+          },
+          onGenerating: () => {
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = { ...next[assistantIdx], stage: "generating" };
+              return next;
+            });
+          },
+          onToken: (delta) => {
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                content: next[assistantIdx].content + delta,
+              };
+              return next;
+            });
+          },
+          onDone: (data) => {
+            setConversationId(data.conversation_id);
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                content: data.answer,
+                intent: data.intent,
+                rewritten_query: data.rewritten_query,
+                sources: data.sources,
+                conversation_id: data.conversation_id,
+                stage: "done",
+              };
+              return next;
+            });
+          },
+          onError: (msg) => {
+            setError(msg);
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                content: `出错：${msg}`,
+                stage: "error",
+              };
+              return next;
+            });
+          },
+        }
+      );
     } catch (e: any) {
       setError(e.message || "问答失败");
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
+      setMessages((prev) => {
+        const next = [...prev];
+        next[assistantIdx] = {
+          ...next[assistantIdx],
           content: `出错：${e.message || "问答失败"}`,
-        },
-      ]);
+          stage: "error",
+        };
+        return next;
+      });
     } finally {
       setLoading(false);
     }
@@ -183,10 +274,32 @@ export default function ChatPanel() {
                     </div>
                   )}
 
-                  {/* 内容 */}
-                  <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-                    {msg.content}
-                  </div>
+                  {/* 思考阶段提示（content 为空时显示思考过程） */}
+                  {msg.role === "assistant" &&
+                    msg.stage &&
+                    msg.stage !== "done" &&
+                    msg.stage !== "error" &&
+                    !msg.content && (
+                      <div className="text-xs text-accent-600 flex items-center gap-1.5 py-1">
+                        <span className="flex gap-1">
+                          <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                          <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                        </span>
+                        {stageText(msg.stage)}
+                      </div>
+                    )}
+
+                  {/* 内容（流式逐 token 追加） */}
+                  {msg.content && (
+                    <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                      {msg.content}
+                      {/* 生成中光标 */}
+                      {msg.role === "assistant" && msg.stage === "generating" && (
+                        <span className="inline-block w-1.5 h-4 bg-accent-500 ml-0.5 animate-pulse align-middle" />
+                      )}
+                    </div>
+                  )}
 
                   {/* 引用来源 */}
                   {msg.sources && msg.sources.length > 0 && (
@@ -222,18 +335,6 @@ export default function ChatPanel() {
                 </div>
               </div>
             ))}
-            {loading && (
-              <div className="flex justify-start animate-fade-in">
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl rounded-bl-sm p-3.5 text-sm text-slate-500 flex items-center gap-2">
-                  <span className="flex gap-1">
-                    <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                    <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                    <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                  </span>
-                  助手思考中...
-                </div>
-              </div>
-            )}
           </div>
         )}
       </div>

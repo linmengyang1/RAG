@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -27,11 +28,38 @@ class Embedding:
 _model = None
 
 
+def _ensure_safetensors(model_id: str) -> None:
+    """确保本地模型有 safetensors 文件，没有则从 pytorch_model.bin 转换
+
+    背景：transformers 4.57.6 修复 CVE-2025-32434，要求 torch>=2.6 才能用
+    torch.load 加载 .bin；但 GTX 1660（CUDA 12.4 驱动）只能用 torch 2.5.1+cu124。
+    safetensors 不走 torch.load，转换后 transformers 优先用 safetensors 加载，
+    绕过 torch 版本限制。
+    """
+    from huggingface_hub import hf_hub_download
+    import torch
+    from safetensors.torch import save_file
+
+    # 下载 pytorch_model.bin（已缓存则直接返回本地路径，不重复下载）
+    bin_path = hf_hub_download(model_id, "pytorch_model.bin")
+    st_path = os.path.join(os.path.dirname(bin_path), "model.safetensors")
+    if os.path.exists(st_path):
+        return  # 已有 safetensors，无需转换
+
+    logger.info(f"转换 {model_id}: pytorch_model.bin -> model.safetensors")
+    # weights_only=False：bge-m3 是 XLMRobertaModel，含自定义类
+    state_dict = torch.load(bin_path, weights_only=False)
+    save_file(state_dict, st_path)
+    logger.info(f"safetensors 转换完成: {st_path}")
+
+
 def get_model():
     """获取 BGEM3FlagModel 单例（首次调用时加载）"""
     global _model
     if _model is None:
         from FlagEmbedding import BGEM3FlagModel
+        # 确保 bge-m3 有 safetensors 文件（绕过 torch.load CVE 检查）
+        _ensure_safetensors(settings.embed_model)
         logger.info(
             f"加载 BGE-M3 模型: {settings.embed_model}, "
             f"device={settings.torch_device}, use_fp16={settings.torch_device == 'cuda'}"

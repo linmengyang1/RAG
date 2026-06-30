@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
@@ -62,7 +64,10 @@ async def search(
     user=Depends(get_current_user),
 ):
     """混合检索：dense + sparse（+ 可选 wiki），RRF 融合，可选 rerank"""
-    results = hybrid_search(
+    # 整个 hybrid_search（含 embed + milvus 检索 + rerank）放线程池，
+    # 避免 reranker 推理阻塞事件循环导致 /health 端点超时无响应
+    results = await asyncio.to_thread(
+        hybrid_search,
         q,
         top_k=top_k,
         category=category,

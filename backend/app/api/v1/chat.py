@@ -24,7 +24,11 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -155,7 +159,10 @@ async def chat(
     )
 
     # 5. 检索相关 chunk（用改写后的 query）
-    results = hybrid_search(
+    # 整个 hybrid_search（含 embed + milvus 检索 + rerank）放线程池，
+    # 避免 reranker 推理阻塞事件循环导致 /health 端点超时无响应
+    results = await asyncio.to_thread(
+        hybrid_search,
         rewritten_query,
         top_k=req.top_k,
         enable_rerank=req.enable_rerank,
@@ -239,4 +246,173 @@ async def chat(
             )
             for r in results
         ],
+    )
+
+
+# ───── SSE 流式端点：分阶段推送思考过程 ─────
+
+
+def _sse(event: str, data: dict) -> str:
+    """构造 SSE 事件帧（event + data 两行 + 空行分隔）"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/stream")
+async def chat_stream(
+    req: ChatRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """RAG 问答流式：SSE 分阶段推送（意图→检索→rerank→生成逐 token）
+
+    事件类型：
+        intent_done   {intent, rewritten_query}      意图识别 + query 改写完成
+        retrieving    {}                              开始检索
+        retrieved     {sources_count}                 检索完成（含 rerank）
+        generating    {}                              开始 LLM 生成
+        token         {delta}                         生成的一个 token 片段
+        done          {conversation_id, intent, ...}  全部完成（含完整 sources）
+        error         {detail}                        异常
+    """
+    async def event_gen():
+        try:
+            # 1. 解析/创建 conversation
+            if req.conversation_id:
+                conv = await db.get(Conversation, req.conversation_id)
+                if conv is None:
+                    yield _sse("error", {"detail": "会话不存在"})
+                    return
+                if conv.user_id != user.id:
+                    yield _sse("error", {"detail": "无权访问该会话"})
+                    return
+            else:
+                conv = Conversation(user_id=user.id, title=req.question[:50])
+                db.add(conv)
+                await db.flush()
+
+            # 2. 写 user message
+            user_msg = Message(
+                conversation_id=conv.id,
+                role="user",
+                content=req.question,
+            )
+            db.add(user_msg)
+            await db.flush()
+
+            # 3. 拉历史（不含当前 user_msg）
+            history_stmt = (
+                select(Message)
+                .where(Message.conversation_id == conv.id)
+                .where(Message.id < user_msg.id)
+                .order_by(Message.id)
+                .limit(8)
+            )
+            history_result = await db.execute(history_stmt)
+            history = [
+                {"role": m.role, "content": m.content}
+                for m in history_result.scalars()
+            ]
+
+            # 4. 意图识别 + query 改写（代词消解）
+            intent_result = await recognize_intent(req.question, history)
+            rewritten_query = intent_result["rewritten_query"]
+            intent = intent_result["intent"]
+            yield _sse("intent_done", {
+                "intent": intent,
+                "rewritten_query": rewritten_query,
+            })
+
+            # 5. 检索（放线程池，避免 reranker 推理阻塞事件循环）
+            yield _sse("retrieving", {})
+            results = await asyncio.to_thread(
+                hybrid_search,
+                rewritten_query,
+                top_k=req.top_k,
+                enable_rerank=req.enable_rerank,
+                enable_wiki=req.enable_wiki,
+            )
+            yield _sse("retrieved", {"sources_count": len(results)})
+
+            # 6. 拼 prompt + 流式生成
+            if not results:
+                answer = "未检索到相关资料，无法回答。"
+                yield _sse("token", {"delta": answer})
+            else:
+                prompt = build_rag_prompt(
+                    question=rewritten_query,
+                    context=results,
+                    history=history,
+                    intent=intent,
+                )
+                yield _sse("generating", {})
+                answer_parts: list[str] = []
+                async for delta in get_llm_client().chat_stream(
+                    [{"role": "user", "content": prompt}],
+                    model=settings.deepseek_main_model,
+                ):
+                    answer_parts.append(delta)
+                    yield _sse("token", {"delta": delta})
+                answer = "".join(answer_parts)
+
+            # 7. 写 assistant message（含 trace）
+            trace = {
+                "retrieved": [
+                    {
+                        "doc_id": r.get("doc_id"),
+                        "score": r.get("score"),
+                        "retrieval_sources": r.get("retrieval_sources", []),
+                    }
+                    for r in results
+                ],
+                "wiki_used": any(
+                    "wiki" in r.get("retrieval_sources", []) for r in results
+                ),
+                "intent": intent,
+                "rewritten_query": rewritten_query,
+            }
+            assistant_msg = Message(
+                conversation_id=conv.id,
+                role="assistant",
+                content=answer,
+                trace=trace,
+            )
+            db.add(assistant_msg)
+
+            logger.info(
+                f"chat_stream 完成: conv_id={conv.id}, sources={len(results)}, "
+                f"answer_len={len(answer)}"
+            )
+
+            # 8. done（含完整 sources 供前端展示）
+            yield _sse("done", {
+                "conversation_id": conv.id,
+                "intent": intent,
+                "rewritten_query": rewritten_query,
+                "answer": answer,
+                "sources": [
+                    {
+                        "text": r["text"][:500],
+                        "score": r["score"],
+                        "doc_id": r.get("doc_id"),
+                        "category": r.get("category"),
+                        "college": r.get("college"),
+                        "subject": r.get("subject"),
+                        "source_url": r.get("source_url"),
+                        "retrieval_sources": r.get("retrieval_sources", []),
+                        "rerank_score": r.get("rerank_score"),
+                        "page_num": r.get("page_num"),
+                        "char_start": r.get("char_start"),
+                        "char_end": r.get("char_end"),
+                    }
+                    for r in results
+                ],
+            })
+        except Exception as e:
+            logger.exception(f"chat_stream 异常: {e}")
+            yield _sse("error", {"detail": str(e)})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
