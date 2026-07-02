@@ -31,8 +31,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_admin, get_current_user
 from app.core.logging import logger
 from app.db.session import get_session
-from app.models.wiki import WikiEntry
+from app.models.wiki import WikiEntry, WikiLink
 from app.services.wiki.generator import generate_wiki_entries
+from app.services.wiki.link_builder import build_all_links
 from app.services.wiki.searcher import search_wiki
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
@@ -67,6 +68,24 @@ class WikiItem(BaseModel):
     category: str | None = None
     college: str | None = None
     subject: str | None = None
+
+
+class RelatedEntry(BaseModel):
+    """相关条目（双向链接关联的条目）"""
+    id: int
+    title: str
+    entry_type: str
+    relation: str  # 链接关系标签（同学院/同方向/相关导师）
+    college: str | None = None
+    subject: str | None = None
+
+
+class WikiItemDetail(WikiItem):
+    """Wiki 条目详情（含相关条目，详情页用）
+
+    related_entries 来自 wiki_links 表（双向链接），由 link_builder.py 离线构建。
+    """
+    related_entries: list[RelatedEntry] = []
 
 
 class WikiListResponse(BaseModel):
@@ -114,6 +133,18 @@ async def generate(
     logger.info(f"wiki 生成请求: doc_ids={req.doc_ids}, limit={req.limit}")
     stats = await generate_wiki_entries(doc_ids=req.doc_ids, limit=req.limit)
     return WikiGenerateResponse(**stats)
+
+
+@router.post("/build-links")
+async def build_links(admin=Depends(get_current_admin)):
+    """构建 wiki 双向链接（仅 admin，零 token 成本）
+
+    基于已有结构化数据（college/subject/source_doc_ids/mentor_id）构建 wiki_links 表。
+    幂等：重复调用只新增不存在的链接（ON CONFLICT DO NOTHING）。
+    """
+    logger.info("触发 wiki 双向链接构建")
+    stats = await build_all_links()
+    return stats
 
 
 @router.get("", response_model=WikiListResponse)
@@ -252,17 +283,44 @@ async def list_colleges(
     ]
 
 
-@router.get("/{entry_id}", response_model=WikiItem)
+@router.get("/{entry_id}", response_model=WikiItemDetail)
 async def get_wiki(
     entry_id: int,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """Wiki 条目详情"""
+    """Wiki 条目详情（含相关条目）
+
+    相关条目来自 wiki_links 表（双向链接），按 relation 分组返回。
+    链接由 link_builder.py 离线构建（同学院/同方向/相关导师等）。
+    """
     entry = await db.get(WikiEntry, entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Wiki 条目不存在")
-    return WikiItem(
+
+    # 查询相关条目：通过 wiki_links.src_entry_id 关联到 dst 的 wiki_entries
+    # 双向插入保证 src=entry_id 即可拿到全部关联（含被反向插入的）
+    related_stmt = (
+        select(WikiEntry, WikiLink.relation)
+        .join(WikiLink, WikiLink.dst_entry_id == WikiEntry.id)
+        .where(WikiLink.src_entry_id == entry_id)
+        .order_by(WikiLink.relation, WikiEntry.id)
+        .limit(30)
+    )
+    related_result = await db.execute(related_stmt)
+    related_entries = [
+        RelatedEntry(
+            id=e.id,
+            title=e.title,
+            entry_type=e.entry_type,
+            relation=rel,
+            college=e.college,
+            subject=e.subject,
+        )
+        for e, rel in related_result
+    ]
+
+    return WikiItemDetail(
         id=entry.id,
         title=entry.title,
         entry_type=entry.entry_type,
@@ -275,4 +333,5 @@ async def get_wiki(
         category=entry.category,
         college=entry.college,
         subject=entry.subject,
+        related_entries=related_entries,
     )

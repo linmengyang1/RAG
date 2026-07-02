@@ -1,0 +1,182 @@
+[
+  {
+    "question": "机电工程学院有哪些导师",
+    "ground_truth": "机电工程学院的导师名单，包括姓名、职称、研究方向等信息",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "数学科学学院的导师名单",
+    "ground_truth": "数学科学学院的导师列表，包括导师姓名和基本信息",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "信息与通信工程学院的导师研究方向是什么",
+    "ground_truth": "信息与通信工程学院导师的研究方向信息",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "经济管理学院有哪些博士生导师",
+    "ground_truth": "经济管理学院的博士生导师名单及职称信息",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "统计各学院导师数量",
+    "ground_truth": "各学院导师数量统计，列出每个学院的导师人数",
+    "intent": "统计查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "全校共有多少导师",
+    "ground_truth": "全校导师总数",
+    "intent": "统计查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "哪个学院导师最多",
+    "ground_truth": "导师数量最多的学院名称及其导师数量",
+    "intent": "统计查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "统计各职称的导师数量",
+    "ground_truth": "各职称（教授、副教授、讲师、博导、硕导等）的导师数量统计",
+    "intent": "统计查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "研究生评教时间是什么时候",
+    "ground_truth": "研究生评教的时间安排和具体要求",
+    "intent": "政策咨询",
+    "category": "培养工作"
+  },
+  {
+    "question": "学籍管理规定有哪些",
+    "ground_truth": "学籍管理规定的要点，包括注册、休学、退学、转专业等要求",
+    "intent": "政策咨询",
+    "category": "培养工作"
+  },
+  {
+    "question": "研究生请假流程",
+    "ground_truth": "研究生请假的流程步骤和审批要求",
+    "intent": "政策咨询",
+    "category": "培养工作"
+  },
+  {
+    "question": "学位授予细则",
+    "ground_truth": "学位授予的具体条件、要求和程序",
+    "intent": "政策咨询",
+    "category": "学位工作"
+  },
+  {
+    "question": "论文答辩流程",
+    "ground_truth": "论文答辩的流程步骤，包括申请、预答辩、正式答辩、材料提交等环节",
+    "intent": "流程办理",
+    "category": "学位工作"
+  },
+  {
+    "question": "学位申请流程",
+    "ground_truth": "学位申请的流程和所需提交的材料",
+    "intent": "流程办理",
+    "category": "学位工作"
+  },
+  {
+    "question": "研究生注册流程",
+    "ground_truth": "新生注册的流程、时间和所需材料",
+    "intent": "流程办理",
+    "category": "培养工作"
+  },
+  {
+    "question": "开题报告流程",
+    "ground_truth": "开题报告的流程、时间节点和具体要求",
+    "intent": "流程办理",
+    "category": "培养工作"
+  },
+  {
+    "question": "推免生申请条件",
+    "ground_truth": "推免生的申请条件、资格要求和选拔流程",
+    "intent": "招生信息",
+    "category": "招生工作"
+  },
+  {
+    "question": "研究生招生计划",
+    "ground_truth": "研究生招生计划，包括招生专业和人数",
+    "intent": "招生信息",
+    "category": "招生工作"
+  },
+  {
+    "question": "复试安排",
+    "ground_truth": "复试的时间、地点、内容和形式",
+    "intent": "招生信息",
+    "category": "招生工作"
+  },
+  {
+    "question": "博士学位授予条件",
+    "ground_truth": "博士学位授予的学术条件、论文要求和学分要求",
+    "intent": "学位管理",
+    "category": "学位工作"
+  },
+  {
+    "question": "硕士学位授予条件",
+    "ground_truth": "硕士学位的授予条件，包括学分、论文和答辩要求",
+    "intent": "学位管理",
+    "category": "学位工作"
+  },
+  {
+    "question": "学位论文规范要求",
+    "ground_truth": "学位论文的格式规范、字数要求和排版标准",
+    "intent": "学位管理",
+    "category": "学位工作"
+  },
+  {
+    "question": "国家奖学金申请条件",
+    "ground_truth": "国家奖学金的申请条件、评定标准和流程",
+    "intent": "奖学金",
+    "category": "研工工作"
+  },
+  {
+    "question": "学业奖学金评定标准",
+    "ground_truth": "学业奖学金的评定标准、比例和发放办法",
+    "intent": "奖学金",
+    "category": "研工工作"
+  },
+  {
+    "question": "研究生助学金政策",
+    "ground_truth": "研究生助学金的资助标准、覆盖范围和发放方式",
+    "intent": "奖学金",
+    "category": "研工工作"
+  },
+  {
+    "question": "研究生开学时间",
+    "ground_truth": "研究生开学报到的时间和安排",
+    "intent": "其他",
+    "category": "培养工作"
+  },
+  {
+    "question": "导师双选流程",
+    "ground_truth": "师生互选（导师双选）的流程、时间节点和操作方式",
+    "intent": "其他",
+    "category": "培养工作"
+  },
+  {
+    "question": "研究生培养方案",
+    "ground_truth": "研究生培养方案的制定要求、课程设置和学分结构",
+    "intent": "其他",
+    "category": "培养工作"
+  },
+  {
+    "question": "课程选修规定",
+    "ground_truth": "课程选修的规则、学分要求和选课流程",
+    "intent": "其他",
+    "category": "培养工作"
+  },
+  {
+    "question": "实验室安全管理规定",
+    "ground_truth": "实验室安全管理的规范要求和注意事项",
+    "intent": "其他",
+    "category": "研工工作"
+  }
+]

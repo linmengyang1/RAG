@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getWikiApi, type WikiItem } from "@/lib/api";
+import { getWikiApi, type WikiItemDetail, type RelatedEntry } from "@/lib/api";
 
 // 类型徽章配色
 const TYPE_BADGE: Record<string, { bg: string; text: string; label: string }> = {
@@ -14,11 +14,18 @@ const TYPE_BADGE: Record<string, { bg: string; text: string; label: string }> = 
   process: { bg: "bg-emerald-100", text: "text-emerald-700", label: "流程" },
 };
 
+// 相关条目关系徽章配色（按 relation 标签区分）
+const RELATION_BADGE: Record<string, { bg: string; text: string }> = {
+  同学院: { bg: "bg-blue-100", text: "text-blue-700" },
+  同方向: { bg: "bg-emerald-100", text: "text-emerald-700" },
+  相关导师: { bg: "bg-purple-100", text: "text-purple-700" },
+};
+
 export default function WikiDetailPage() {
   const params = useParams();
   const router = useRouter();
   const id = Number(params.id);
-  const [entry, setEntry] = useState<WikiItem | null>(null);
+  const [entry, setEntry] = useState<WikiItemDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -154,6 +161,69 @@ export default function WikiDetailPage() {
             </ReactMarkdown>
           </article>
         </div>
+
+        {/* 相关条目（双向链接，来自 wiki_links 表） */}
+        {entry.related_entries && entry.related_entries.length > 0 && (
+          <div className="mt-6 bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+            <h2 className="text-sm font-semibold text-slate-700 mb-4 flex items-center gap-2">
+              <svg
+                className="w-4 h-4 text-slate-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                />
+              </svg>
+              相关条目
+              <span className="text-xs text-slate-400 font-normal">
+                （{entry.related_entries.length}）
+              </span>
+            </h2>
+            {/* 按 relation 分组展示 */}
+            {Object.entries(
+              entry.related_entries.reduce((acc, e) => {
+                (acc[e.relation] ??= []).push(e);
+                return acc;
+              }, {} as Record<string, RelatedEntry[]>)
+            ).map(([relation, items]) => {
+              const badge =
+                RELATION_BADGE[relation] || {
+                  bg: "bg-slate-100",
+                  text: "text-slate-600",
+                };
+              return (
+                <div key={relation} className="mb-4 last:mb-0">
+                  <span
+                    className={`inline-block text-xs px-2 py-0.5 rounded-full mb-2 ${badge.bg} ${badge.text}`}
+                  >
+                    {relation}
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {items.map((e) => (
+                      <button
+                        key={e.id}
+                        onClick={() => router.push(`/wiki/${e.id}`)}
+                        className="flex items-center gap-2 text-sm px-3 py-1.5 bg-slate-50 hover:bg-purple-50 text-slate-700 hover:text-purple-700 border border-slate-200 hover:border-purple-200 rounded-md transition-colors"
+                      >
+                        <span>{e.title}</span>
+                        {e.college && (
+                          <span className="text-xs text-slate-400">
+                            · {e.college}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* 底部操作 */}
         <div className="mt-6 flex justify-center">

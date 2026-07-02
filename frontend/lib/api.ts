@@ -91,6 +91,21 @@ export interface WikiItem {
   subject: string | null;
 }
 
+// 相关条目（双向链接关联的条目）
+export interface RelatedEntry {
+  id: number;
+  title: string;
+  entry_type: string;
+  relation: string; // 链接关系标签（同学院/同方向/相关导师）
+  college: string | null;
+  subject: string | null;
+}
+
+// Wiki 条目详情（含相关条目，详情页用）
+export interface WikiItemDetail extends WikiItem {
+  related_entries: RelatedEntry[];
+}
+
 export interface WikiListResponse {
   total: number;
   page: number;
@@ -343,9 +358,9 @@ export async function listWikiApi(
 }
 
 /**
- * Wiki 详情
+ * Wiki 详情（含相关条目）
  */
-export async function getWikiApi(id: number): Promise<WikiItem> {
+export async function getWikiApi(id: number): Promise<WikiItemDetail> {
   const resp = await fetch(`/api/v1/wiki/${id}`);
   if (!resp.ok) {
     throw new Error(`Wiki 详情失败: ${resp.status}`);

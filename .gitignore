@@ -46,6 +46,8 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 frontend/.npm-cache/
+# TypeScript 增量构建缓存（每次 tsc 检查自动生成，不应入库）
+frontend/tsconfig.tsbuildinfo
 
 # 误生成的临时文件（pip 命令错误产物）
 backend/=*
