@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import SearchPanel from "@/components/SearchPanel";
 import ChatPanel from "@/components/ChatPanel";
 import WikiPanel from "@/components/WikiPanel";
@@ -25,12 +26,21 @@ const TABS: { id: Tab; label: string; icon: string; desc: string }[] = [
     id: "wiki",
     label: "Wiki",
     icon: "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253",
-    desc: "LLM 沉淀的人物/政策/流程条目，支持生成与检索",
+    desc: "LLM 沉淀的人物/政策/流程条目，支持检索",
   },
 ];
 
-export default function Home() {
-  const [tab, setTab] = useState<Tab>("chat");
+function HomeContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialTab = (searchParams.get("tab") as Tab) || "chat";
+  const [tab, setTab] = useState<Tab>(initialTab);
+
+  // 切换 tab 时同步到 URL
+  function handleTabChange(tabId: Tab) {
+    setTab(tabId);
+    router.push(`/?tab=${tabId}`, { scroll: false });
+  }
 
   return (
     <div className="min-h-screen">
@@ -81,7 +91,7 @@ export default function Home() {
             {TABS.map((t) => (
               <button
                 key={t.id}
-                onClick={() => setTab(t.id)}
+                onClick={() => handleTabChange(t.id)}
                 className={`px-4 py-3 text-sm border-b-2 transition-all flex items-center gap-2 ${
                   tab === t.id
                     ? "border-brand-600 text-brand-700 font-medium"
@@ -117,7 +127,7 @@ export default function Home() {
       </div>
 
       {/* 主内容 */}
-      <main className="max-w-5xl mx-auto px-4 py-5">
+      <main className={`${tab === "wiki" ? "max-w-7xl" : "max-w-5xl"} mx-auto px-4 py-5`}>
         <div key={tab} className="animate-fade-in">
           {tab === "chat" && <ChatPanel />}
           {tab === "search" && <SearchPanel />}
@@ -132,5 +142,14 @@ export default function Home() {
         </div>
       </footer>
     </div>
+  );
+}
+
+// 用 Suspense 包裹，因为 useSearchParams 需要
+export default function Home() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-50 flex items-center justify-center"><div className="text-slate-500 text-sm">加载中...</div></div>}>
+      <HomeContent />
+    </Suspense>
   );
 }

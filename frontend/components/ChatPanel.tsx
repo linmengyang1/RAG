@@ -1,8 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import ResultCard from "./ResultCard";
-import { chatStreamApi, type ChatSource } from "@/lib/api";
+import {
+  chatStreamApi,
+  listConversationsApi,
+  getConversationApi,
+  deleteConversationApi,
+  type ChatSource,
+  type ConversationItem,
+} from "@/lib/api";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -13,6 +20,12 @@ interface ChatMessage {
   conversation_id?: number;
   // 流式思考阶段：intent / intent_done / retrieving / retrieved / generating / done / error
   stage?: string;
+  // 检索子阶段：embedding / dense / sparse / reranking（仅 stage="retrieving" 时有效）
+  retrieveStage?: string;
+  // 各阶段完成时的累计耗时（ms，从请求开始算，由后端 SSE elapsed_ms 提供）
+  stageTimes?: Record<string, number>;
+  // 请求开始的时间戳（performance.now()），用于实时计时显示
+  startTime?: number;
 }
 
 // 阶段提示文本
@@ -33,6 +46,22 @@ function stageText(stage?: string): string {
   }
 }
 
+// 检索子阶段提示文本（stage="retrieving" 时根据 retrieveStage 显示更细的进度）
+function retrieveStageText(stage?: string): string {
+  switch (stage) {
+    case "embedding":
+      return "向量化查询中（BGE-M3 编码 query）...";
+    case "dense":
+      return "向量检索中（dense HNSW + COSINE）...";
+    case "sparse":
+      return "关键词检索中（sparse BM25）...";
+    case "reranking":
+      return "rerank 精排中（bge-reranker-v2-m3）...";
+    default:
+      return "检索中（向量 + 关键词双路 RRF + rerank）...";
+  }
+}
+
 export default function ChatPanel() {
   const [input, setInput] = useState("");
   const [topK, setTopK] = useState(5);
@@ -43,15 +72,43 @@ export default function ChatPanel() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversationId, setConversationId] = useState<number | null>(null);
 
+  // 会话列表
+  const [conversations, setConversations] = useState<ConversationItem[]>([]);
+  const [showSidebar, setShowSidebar] = useState(true);
+
+  // 加载会话列表
+  const loadConversations = useCallback(async () => {
+    try {
+      const resp = await listConversationsApi(1, 30);
+      setConversations(resp.items);
+    } catch {
+      // 静默失败
+    }
+  }, []);
+
+  useEffect(() => {
+    loadConversations();
+  }, [loadConversations]);
+
+  // loading 期间每 100ms 触发重渲染，让思考阶段的实时耗时持续更新
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!loading) return;
+    const timer = setInterval(() => setTick((t) => t + 1), 100);
+    return () => clearInterval(timer);
+  }, [loading]);
+
   async function handleSend() {
     if (!input.trim()) return;
     const userMsg: ChatMessage = { role: "user", content: input };
     // 占位 assistant message，流式回调会逐步更新它
     const assistantIdx = messages.length + 1;
+    // 记录请求开始时间，用于实时计时（直到后端首个事件到达）
+    const startTime = performance.now();
     setMessages((prev) => [
       ...prev,
       userMsg,
-      { role: "assistant", content: "", stage: "intent" },
+      { role: "assistant", content: "", stage: "intent", startTime },
     ]);
     setLoading(true);
     setError("");
@@ -69,7 +126,7 @@ export default function ChatPanel() {
           enable_wiki: enableWiki,
         },
         {
-          onIntent: (intent, rewrittenQuery) => {
+          onIntent: (intent, rewrittenQuery, elapsedMs) => {
             setMessages((prev) => {
               const next = [...prev];
               next[assistantIdx] = {
@@ -77,28 +134,68 @@ export default function ChatPanel() {
                 intent,
                 rewritten_query: rewrittenQuery,
                 stage: "intent_done",
+                stageTimes: {
+                  ...(next[assistantIdx].stageTimes || {}),
+                  intent_done: elapsedMs,
+                },
               };
               return next;
             });
           },
-          onRetrieving: () => {
+          onRetrieving: (elapsedMs) => {
             setMessages((prev) => {
               const next = [...prev];
-              next[assistantIdx] = { ...next[assistantIdx], stage: "retrieving" };
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                stage: "retrieving",
+                stageTimes: {
+                  ...(next[assistantIdx].stageTimes || {}),
+                  retrieving: elapsedMs,
+                },
+              };
               return next;
             });
           },
-          onRetrieved: () => {
+          onRetrievingStage: (stage, elapsedMs) => {
+            // 检索子阶段进度：embedding / dense / sparse / reranking
             setMessages((prev) => {
               const next = [...prev];
-              next[assistantIdx] = { ...next[assistantIdx], stage: "retrieved" };
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                retrieveStage: stage,
+                stageTimes: {
+                  ...(next[assistantIdx].stageTimes || {}),
+                  [`retrieve_${stage}`]: elapsedMs,
+                },
+              };
               return next;
             });
           },
-          onGenerating: () => {
+          onRetrieved: (count, elapsedMs) => {
             setMessages((prev) => {
               const next = [...prev];
-              next[assistantIdx] = { ...next[assistantIdx], stage: "generating" };
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                stage: "retrieved",
+                stageTimes: {
+                  ...(next[assistantIdx].stageTimes || {}),
+                  retrieved: elapsedMs,
+                },
+              };
+              return next;
+            });
+          },
+          onGenerating: (elapsedMs) => {
+            setMessages((prev) => {
+              const next = [...prev];
+              next[assistantIdx] = {
+                ...next[assistantIdx],
+                stage: "generating",
+                stageTimes: {
+                  ...(next[assistantIdx].stageTimes || {}),
+                  generating: elapsedMs,
+                },
+              };
               return next;
             });
           },
@@ -124,6 +221,10 @@ export default function ChatPanel() {
                 sources: data.sources,
                 conversation_id: data.conversation_id,
                 stage: "done",
+                stageTimes: {
+                  ...(next[assistantIdx].stageTimes || {}),
+                  done: data.elapsed_ms,
+                },
               };
               return next;
             });
@@ -165,32 +266,139 @@ export default function ChatPanel() {
     setInput("");
   }
 
+  // 切换到某个会话
+  async function switchConversation(convId: number) {
+    try {
+      const detail = await getConversationApi(convId);
+      const msgs: ChatMessage[] = detail.messages.map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
+      setMessages(msgs);
+      setConversationId(convId);
+      setError("");
+    } catch (e: any) {
+      setError(e.message || "加载会话失败");
+    }
+  }
+
+  // 删除会话
+  async function deleteConversation(convId: number) {
+    try {
+      await deleteConversationApi(convId);
+      if (conversationId === convId) {
+        setMessages([]);
+        setConversationId(null);
+      }
+      loadConversations();
+    } catch (e: any) {
+      setError(e.message || "删除会话失败");
+    }
+  }
+
+  // 刷新会话列表
+  useCallback(() => {
+    if (!loading) loadConversations();
+  }, [loading, loadConversations]);
+
   return (
-    <div className="space-y-4">
-      {/* 会话控制 */}
-      <div className="bg-white rounded-lg border border-slate-200 p-3 flex items-center justify-between shadow-card">
-        <div className="text-sm text-slate-600 flex items-center gap-2">
-          <svg className="w-4 h-4 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-          </svg>
-          <span>当前会话 ID：</span>
-          <span className="font-mono px-2 py-0.5 rounded bg-brand-50 text-brand-700 text-xs">
-            {conversationId ?? "（新会话）"}
-          </span>
-          <span className="text-xs text-slate-400 ml-2 hidden sm:inline">
-            （多轮对话：第 1 轮建立会话，后续轮次自动消解代词）
-          </span>
+    <div className="flex gap-3">
+      {/* 左侧会话列表 */}
+      {showSidebar && (
+        <aside className="w-52 flex-shrink-0">
+          <div className="bg-white rounded-lg border border-slate-200 p-2 sticky top-4 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-2 px-1">
+              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                会话列表
+              </span>
+              <button
+                onClick={() => setShowSidebar(false)}
+                className="text-slate-300 hover:text-slate-500"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* 新建会话 */}
+            <button
+              onClick={handleNewConversation}
+              className="w-full text-left px-2 py-1.5 text-xs rounded hover:bg-slate-100 text-slate-700 mb-1 flex items-center gap-1.5"
+            >
+              <svg className="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              新会话
+            </button>
+            {/* 会话列表 */}
+            <div className="space-y-0.5">
+              {conversations.map((conv) => (
+                <div
+                  key={conv.id}
+                  className={`group flex items-center justify-between px-2 py-1.5 rounded text-xs cursor-pointer ${
+                    conversationId === conv.id
+                      ? "bg-brand-50 text-brand-700"
+                      : "text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  <span
+                    className="truncate flex-1"
+                    onClick={() => switchConversation(conv.id)}
+                    title={conv.title || `会话 #${conv.id}`}
+                  >
+                    {conv.title || `会话 #${conv.id}`}
+                  </span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm("确定删除该会话？")) deleteConversation(conv.id);
+                    }}
+                    className="ml-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+              {conversations.length === 0 && (
+                <div className="text-xs text-slate-400 px-2 py-2">暂无会话</div>
+              )}
+            </div>
+          </div>
+        </aside>
+      )}
+
+      {/* 主对话区域 */}
+      <div className="flex-1 min-w-0 space-y-4">
+        {/* 会话控制 */}
+        <div className="bg-white rounded-lg border border-slate-200 p-3 flex items-center justify-between shadow-card">
+          <div className="text-sm text-slate-600 flex items-center gap-2">
+            {!showSidebar && (
+              <button
+                onClick={() => setShowSidebar(true)}
+                className="mr-1 text-slate-400 hover:text-slate-600"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+            )}
+            <svg className="w-4 h-4 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+            <span>当前会话：</span>
+            <span className="font-mono px-2 py-0.5 rounded bg-brand-50 text-brand-700 text-xs">
+              {conversationId ? `#${conversationId}` : "（新会话）"}
+            </span>
+          </div>
+          <button
+            onClick={handleNewConversation}
+            className="px-3 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded text-slate-700 transition-colors"
+          >
+            新建会话
+          </button>
         </div>
-        <button
-          onClick={handleNewConversation}
-          className="px-3 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded text-slate-700 transition-colors flex items-center gap-1"
-        >
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          新建会话
-        </button>
-      </div>
 
       {/* 参数区 */}
       <div className="bg-white rounded-lg border border-slate-200 p-3 space-y-2 shadow-card">
@@ -205,7 +413,7 @@ export default function ChatPanel() {
         <input
           type="range"
           min={1}
-          max={20}
+          max={50}
           value={topK}
           onChange={(e) => setTopK(Number(e.target.value))}
           className="w-full accent-brand-600"
@@ -274,19 +482,116 @@ export default function ChatPanel() {
                     </div>
                   )}
 
-                  {/* 思考阶段提示（content 为空时显示思考过程） */}
+                  {/* 思考阶段提示（content 为空时显示各阶段进度 + 实时耗时） */}
                   {msg.role === "assistant" &&
                     msg.stage &&
                     msg.stage !== "done" &&
                     msg.stage !== "error" &&
                     !msg.content && (
-                      <div className="text-xs text-accent-600 flex items-center gap-1.5 py-1">
-                        <span className="flex gap-1">
-                          <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                          <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                          <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                        </span>
-                        {stageText(msg.stage)}
+                      <div className="text-xs text-slate-500 space-y-0.5 py-1">
+                        {/* 已完成阶段显示（含各自耗时） */}
+                        {msg.stageTimes?.intent_done !== undefined && (
+                          <div className="flex items-center gap-1 text-green-600">
+                            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+                            意图识别 {(msg.stageTimes.intent_done / 1000).toFixed(1)}s
+                          </div>
+                        )}
+                        {msg.stageTimes?.retrieve_dense !== undefined && (
+                          <div className="flex items-center gap-1 text-green-600">
+                            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+                            向量检索 {((msg.stageTimes.retrieve_dense - (msg.stageTimes.retrieving || 0)) / 1000).toFixed(1)}s
+                          </div>
+                        )}
+                        {msg.stageTimes?.retrieve_sparse !== undefined && (
+                          <div className="flex items-center gap-1 text-green-600">
+                            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+                            关键词检索 {((msg.stageTimes.retrieve_sparse - msg.stageTimes.retrieve_dense) / 1000).toFixed(1)}s
+                          </div>
+                        )}
+                        {msg.stageTimes?.retrieve_reranking !== undefined && (
+                          <div className="flex items-center gap-1 text-green-600">
+                            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+                            rerank 精排 {(((msg.stageTimes.retrieved || 0) - msg.stageTimes.retrieve_reranking) / 1000).toFixed(1)}s
+                          </div>
+                        )}
+                        {/* 当前进行中的阶段 */}
+                        <div className="flex items-center gap-1.5 text-accent-600">
+                          <span className="flex gap-1">
+                            <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                            <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                            <span className="w-1.5 h-1.5 bg-accent-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                          </span>
+                          {msg.stage === "retrieving" && msg.retrieveStage
+                            ? retrieveStageText(msg.retrieveStage)
+                            : stageText(msg.stage)}
+                          {msg.startTime && (
+                            <span className="text-slate-400 font-mono">
+                              ({((performance.now() - msg.startTime) / 1000).toFixed(1)}s)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                  {/* 思考过程摘要（完成后显示在内容上方） */}
+                  {msg.role === "assistant" &&
+                    msg.stage === "done" &&
+                    msg.stageTimes && (
+                      <div className="mb-3 bg-gradient-to-r from-slate-50 to-white border border-slate-200 rounded-lg p-3">
+                        <div className="text-xs text-slate-400 mb-1.5 flex items-center gap-1">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                          </svg>
+                          思考过程
+                        </div>
+                        {/* 各阶段耗时 */}
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-slate-600">
+                          {msg.stageTimes.intent_done !== undefined && (
+                            <div>意图识别 <span className="font-mono text-slate-800">{(msg.stageTimes.intent_done / 1000).toFixed(1)}s</span></div>
+                          )}
+                          {msg.stageTimes.retrieve_dense !== undefined && (
+                            <div>向量检索 <span className="font-mono text-slate-800">{((msg.stageTimes.retrieve_dense - (msg.stageTimes.retrieving || 0)) / 1000).toFixed(1)}s</span></div>
+                          )}
+                          {msg.stageTimes.retrieve_sparse !== undefined && (
+                            <div>关键词检索 <span className="font-mono text-slate-800">{((msg.stageTimes.retrieve_sparse - msg.stageTimes.retrieve_dense) / 1000).toFixed(1)}s</span></div>
+                          )}
+                          {msg.stageTimes.retrieve_reranking !== undefined && (
+                            <div>rerank 精排 <span className="font-mono text-slate-800">{(((msg.stageTimes.retrieved || 0) - msg.stageTimes.retrieve_reranking) / 1000).toFixed(1)}s</span></div>
+                          )}
+                          {msg.stageTimes.done !== undefined && msg.stageTimes.retrieved !== undefined && (
+                            <div>LLM 生成 <span className="font-mono text-slate-800">{((msg.stageTimes.done - msg.stageTimes.retrieved) / 1000).toFixed(1)}s</span></div>
+                          )}
+                          {msg.stageTimes.done !== undefined && (
+                            <div className="col-span-2 pt-1 mt-0.5 border-t border-slate-200 font-medium">
+                              总计 <span className="font-mono text-slate-800">{(msg.stageTimes.done / 1000).toFixed(1)}s</span>
+                            </div>
+                          )}
+                        </div>
+                        {/* 工具/方法说明 */}
+                        <div className="mt-2 pt-2 border-t border-slate-100 text-[10px] text-slate-400 flex flex-wrap gap-2">
+                          {msg.intent && (
+                            <span className="inline-flex items-center gap-0.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                              意图：{msg.intent}
+                            </span>
+                          )}
+                          {msg.conversation_id && (
+                            <span className="inline-flex items-center gap-0.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                              多轮对话
+                            </span>
+                          )}
+                          <span className="inline-flex items-center gap-0.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                            检索方式：BGE-M3 双路 (dense+sparse) RRF 融合
+                          </span>
+                          {msg.sources && msg.sources.length > 0 && (
+                            <span className="inline-flex items-center gap-0.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                              检索命中 {msg.sources.length} 条
+                            </span>
+                          )}
+                        </div>
                       </div>
                     )}
 
@@ -294,7 +599,6 @@ export default function ChatPanel() {
                   {msg.content && (
                     <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
                       {msg.content}
-                      {/* 生成中光标 */}
                       {msg.role === "assistant" && msg.stage === "generating" && (
                         <span className="inline-block w-1.5 h-4 bg-accent-500 ml-0.5 animate-pulse align-middle" />
                       )}
@@ -375,6 +679,7 @@ export default function ChatPanel() {
           </svg>
           发送
         </button>
+      </div>
       </div>
     </div>
   );

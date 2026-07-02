@@ -26,6 +26,9 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    # 优雅退出 60 秒，确保 etcd 收到 SIGTERM 后能 flush WAL 完整落盘
+    # 防止 WSL2 强制关闭时 SIGKILL 导致 WAL 损坏、元数据丢失
+    stop_grace_period: 60s
     restart: unless-stopped
 
   minio:
@@ -122,7 +125,7 @@ services:
     volumes:
       - ./backend:/app/backend
       - ./infra:/app/infra:ro
-      - ../output:/data/output:ro
+      - ../output:/data/output:rw
       - mineru_cache:/data/mineru_cache
       - huggingface_cache:/root/.cache/huggingface
       - ./models:/models          # BGE-M3 模型缓存（首次下载后持久化，约 2.4GB）

@@ -85,6 +85,10 @@ export interface WikiItem {
   source_doc_ids: number[] | null;
   mention_count: number;
   version: number;
+  // 新增分类字段（bwiki 风格分类导航用）
+  category: string | null;
+  college: string | null;
+  subject: string | null;
 }
 
 export interface WikiListResponse {
@@ -102,12 +106,22 @@ export interface WikiSearchResultItem {
   summary: string;
   score: number;
   retrieval_sources: string[];
+  // 新增分类字段
+  category: string | null;
+  college: string | null;
+  subject: string | null;
 }
 
 export interface WikiSearchResponse {
   query: string;
   total: number;
   results: WikiSearchResultItem[];
+}
+
+// 学院分组统计（bwiki 左侧导航用）
+export interface CollegeStat {
+  college: string;
+  count: number;
 }
 
 /**
@@ -133,6 +147,66 @@ export async function searchApi(opts: SearchOptions): Promise<SearchResponse> {
   return resp.json();
 }
 
+// ───── 会话管理 API ─────
+
+export interface ConversationItem {
+  id: number;
+  title: string | null;
+  message_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ConversationListResponse {
+  items: ConversationItem[];
+  total: number;
+}
+
+export interface MessageItem {
+  id: number;
+  role: string;
+  content: string;
+  created_at: string | null;
+}
+
+export interface ConversationDetail {
+  id: number;
+  title: string | null;
+  messages: MessageItem[];
+}
+
+/** 列出当前用户的会话 */
+export async function listConversationsApi(
+  page = 1,
+  pageSize = 20
+): Promise<ConversationListResponse> {
+  const params = new URLSearchParams();
+  params.set("page", String(page));
+  params.set("page_size", String(pageSize));
+  const resp = await fetch(`/api/v1/conversations?${params.toString()}`);
+  if (!resp.ok) throw new Error(`获取会话列表失败: ${resp.status}`);
+  return resp.json();
+}
+
+/** 获取会话详情（含消息） */
+export async function getConversationApi(
+  convId: number
+): Promise<ConversationDetail> {
+  const resp = await fetch(`/api/v1/conversations/${convId}`);
+  if (!resp.ok) throw new Error(`获取会话失败: ${resp.status}`);
+  return resp.json();
+}
+
+/** 删除会话 */
+export async function deleteConversationApi(
+  convId: number
+): Promise<void> {
+  const resp = await fetch(`/api/v1/conversations/${convId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw new Error(`删除会话失败: ${resp.status}`);
+}
+
 /**
  * 调用问答 API
  */
@@ -150,12 +224,15 @@ export async function chatApi(req: ChatRequest): Promise<ChatResponse> {
 
 // ───── SSE 流式问答回调 ─────
 export interface ChatStreamCallbacks {
-  onIntent: (intent: string, rewrittenQuery: string) => void;
-  onRetrieving: () => void;
-  onRetrieved: (count: number) => void;
-  onGenerating: () => void;
+  onIntent: (intent: string, rewrittenQuery: string, elapsedMs: number) => void;
+  onRetrieving: (elapsedMs: number) => void;
+  // 检索子阶段进度：stage 为 "embedding"/"dense"/"sparse"/"reranking"
+  onRetrievingStage: (stage: string, elapsedMs: number) => void;
+  onRetrieved: (count: number, elapsedMs: number) => void;
+  onGenerating: (elapsedMs: number) => void;
   onToken: (delta: string) => void;
   onDone: (data: {
+    elapsed_ms: number;
     conversation_id: number;
     intent: string;
     rewritten_query: string;
@@ -215,16 +292,19 @@ export async function chatStreamApi(
 
       switch (event) {
         case "intent_done":
-          callbacks.onIntent(parsed.intent, parsed.rewritten_query);
+          callbacks.onIntent(parsed.intent, parsed.rewritten_query, parsed.elapsed_ms ?? 0);
           break;
         case "retrieving":
-          callbacks.onRetrieving();
+          callbacks.onRetrieving(parsed.elapsed_ms ?? 0);
+          break;
+        case "retrieving_stage":
+          callbacks.onRetrievingStage(parsed.stage, parsed.elapsed_ms ?? 0);
           break;
         case "retrieved":
-          callbacks.onRetrieved(parsed.sources_count);
+          callbacks.onRetrieved(parsed.sources_count, parsed.elapsed_ms ?? 0);
           break;
         case "generating":
-          callbacks.onGenerating();
+          callbacks.onGenerating(parsed.elapsed_ms ?? 0);
           break;
         case "token":
           callbacks.onToken(parsed.delta);
@@ -246,10 +326,12 @@ export async function chatStreamApi(
 export async function listWikiApi(
   entryType?: string,
   page = 1,
-  pageSize = 20
+  pageSize = 20,
+  college?: string
 ): Promise<WikiListResponse> {
   const params = new URLSearchParams();
   if (entryType) params.set("entry_type", entryType);
+  if (college) params.set("college", college);
   params.set("page", String(page));
   params.set("page_size", String(pageSize));
 
@@ -285,6 +367,22 @@ export async function searchWikiApi(
   const resp = await fetch(`/api/v1/wiki/search?${params.toString()}`);
   if (!resp.ok) {
     throw new Error(`Wiki 检索失败: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/**
+ * Wiki 学院分组统计（bwiki 左侧导航用）
+ */
+export async function listWikiCollegesApi(
+  entryType?: string
+): Promise<CollegeStat[]> {
+  const params = new URLSearchParams();
+  if (entryType) params.set("entry_type", entryType);
+
+  const resp = await fetch(`/api/v1/wiki/colleges?${params.toString()}`);
+  if (!resp.ok) {
+    throw new Error(`获取学院列表失败: ${resp.status}`);
   }
   return resp.json();
 }

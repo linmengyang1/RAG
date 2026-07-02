@@ -14,10 +14,12 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.logging import logger
 from app.db.session import session_scope
 from app.models.document import (
@@ -30,6 +32,7 @@ from app.models.document import (
     DOC_STATUS_PARSING,
     DOC_STATUS_PENDING,
 )
+from app.models.mentor import Mentor
 from app.services.ingestion.chunker import chunk_text
 from app.services.ingestion.embedder import embed
 from app.services.ingestion.markdown_parser import ParsedDoc, parse_markdown
@@ -42,7 +45,8 @@ async def _parse_file(sr: ScanResult) -> ParsedDoc:
     """解析文件，返回 ParsedDoc
 
     md 文件用 markdown_parser（同步，不走网络）；
-    pdf/docx 走 MinerU API（async）。
+    pdf/docx 走 MinerU API，解析后缓存 md 到 mineru_cache_dir，
+    重跑时优先读缓存，避免重复消耗 MinerU 配额。
     """
     if sr.file_type == "md":
         parsed = parse_markdown(sr.path)
@@ -53,15 +57,55 @@ async def _parse_file(sr: ScanResult) -> ParsedDoc:
             parsed.subject = sr.subject
         return parsed
 
-    # pdf/docx：走 MinerU
+    # pdf/docx：先查 MinerU md 缓存
+    cache_path = _mineru_cache_path(sr.rel_path)
+    if cache_path.exists():
+        logger.info(f"命中 MinerU 缓存: {cache_path}")
+        return ParsedDoc(
+            text=cache_path.read_text(encoding="utf-8"),
+            college=sr.college,
+            subject=sr.subject,
+            page_map=None,  # 缓存 md 不含页码映射，但不影响切片
+        )
+
+    # 缓存未命中，走 MinerU API
     client = get_mineru_client()
     result = await client.parse(sr.path)
+
+    # 保存 MinerU markdown 到本地缓存
+    _save_mineru_cache(cache_path, result.markdown)
+
     return ParsedDoc(
         text=result.markdown,
         college=sr.college,
         subject=sr.subject,
         page_map=result.page_map,  # 可能为 None（MinerU 不一定提供页码映射）
     )
+
+
+def _mineru_cache_path(rel_path: str) -> Path:
+    """根据文件相对路径计算 MinerU 缓存文件路径
+
+    files/培养工作/答辩公告/1173_xxx.pdf
+        → /data/output/files_md/培养工作/答辩公告/1173_xxx.md
+    """
+    output_dir = Path(settings.data_output_dir)
+    # rel_path 如 "files/培养工作/xxx.pdf"，去掉 "files/" 前缀后在 files_md/ 下重建结构
+    if rel_path.startswith("files/"):
+        rel_md = "files_md/" + rel_path[6:]
+    else:
+        rel_md = "files_md/" + rel_path
+    return (output_dir / rel_md).with_suffix(".md")
+
+
+def _save_mineru_cache(cache_path: Path, markdown: str) -> None:
+    """保存 MinerU 解析结果为本地 md 缓存文件"""
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(markdown, encoding="utf-8")
+        logger.info(f"MinerU 缓存已保存: {cache_path}")
+    except OSError as e:
+        logger.warning(f"保存 MinerU 缓存失败: {e}")
 
 
 async def _get_or_create_document(session, sr: ScanResult) -> tuple[int, bool]:
@@ -107,20 +151,25 @@ async def _update_doc_status(doc_id: int, status: str, error_msg: Optional[str] 
 async def run_pipeline(
     limit_md: Optional[int] = None,
     limit_pdf: Optional[int] = None,
+    scan_results: Optional[list] = None,
 ) -> dict:
     """端到端摄入管线主入口
 
     Args:
         limit_md: markdown 文件数量上限（None 不限）
         limit_pdf: pdf/docx 文件数量上限（None 不限）
+        scan_results: 外部注入的扫描结果（可选，用于指定文件类型子集）。
+                     传入时忽略 limit_md/limit_pdf。
 
     Returns:
         统计 dict: {total, success, failed, chunks}
     """
-    logger.info(f"启动摄入管线: limit_md={limit_md}, limit_pdf={limit_pdf}")
+    logger.info(f"启动摄入管线: limit_md={limit_md}, limit_pdf={limit_pdf}, "
+                f"injected={scan_results is not None}")
 
-    # 1. 扫描
-    scan_results = scan(limit_md, limit_pdf)
+    # 1. 扫描（若外部注入了 scan_results 则直接使用）
+    if scan_results is None:
+        scan_results = scan(limit_md, limit_pdf)
     if not scan_results:
         logger.warning("未扫描到任何文件")
         return {"total": 0, "success": 0, "failed": 0, "chunks": 0}
@@ -153,6 +202,11 @@ async def run_pipeline(
                 continue
 
             # d. 写 Chunks（milvus_id 暂空）
+            # 若文档属于导师信息分类，尝试按文件名匹配 mentor_id
+            mentor_id = None
+            if sr.category == "导师信息":
+                mentor_id = await _resolve_mentor_id(sr.rel_path)
+
             chunk_ids: list[int] = []
             async with session_scope() as session:
                 for tc in chunks:
@@ -164,6 +218,7 @@ async def run_pipeline(
                         page_num=tc.page_num,
                         char_start=tc.char_start,
                         char_end=tc.char_end,
+                        mentor_id=mentor_id,
                     )
                     session.add(chunk)
                     await session.flush()
@@ -215,3 +270,37 @@ async def run_pipeline(
 
     logger.info(f"摄入完成: {stats}")
     return stats
+
+
+def _parse_mentor_name_from_path(file_path: str) -> str | None:
+    """从文件路径中解析导师姓名
+
+    文件路径示例：
+        导师信息/机电工程学院/机械类别/王阳_机电工程学院_机械类别.md
+        导师信息/马克思主义学院/陈宪章_马克思主义学院.md
+    返回第一个下划线前的内容作为姓名。
+    """
+    import re
+    filename = Path(file_path).name
+    filename = re.sub(r"\.(md|pdf|docx|doc)$", "", filename, flags=re.IGNORECASE)
+    parts = filename.split("_", 1)
+    name = parts[0].strip() if parts else filename.strip()
+    if not name or len(name) < 2:
+        return None
+    return name
+
+
+async def _resolve_mentor_id(file_path: str) -> int | None:
+    """按文件名解析导师姓名，查 mentors 表，返回 mentor_id"""
+    name = _parse_mentor_name_from_path(file_path)
+    if not name:
+        return None
+
+    async with session_scope() as session:
+        stmt = select(Mentor.id).where(Mentor.name == name)
+        result = await session.execute(stmt)
+        mid = result.scalar_one_or_none()
+
+    if mid:
+        logger.debug(f"导师匹配: {file_path} → {name} (mentor_id={mid})")
+    return mid

@@ -13,7 +13,7 @@ RRF 公式：score(d) = sum( 1 / (k + rank_i(d)) )，k 默认 60
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -30,6 +30,7 @@ def hybrid_search(
     category: Optional[str] = None,
     enable_rerank: bool = True,
     enable_wiki: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> list[dict]:
     """混合检索：dense + sparse（+ 可选 wiki），RRF 融合，可选 rerank
 
@@ -39,6 +40,8 @@ def hybrid_search(
         category: 可选分类过滤（如 "导师信息"）
         enable_rerank: 是否启用 rerank 精排（候选数 > top_k 时生效）
         enable_wiki: 是否启用 wiki 第三路检索
+        progress_callback: 可选回调，检索进入新阶段时调用（传阶段名：
+            "embedding" / "dense" / "sparse" / "reranking"），用于 SSE 流式推送进度
 
     Returns:
         结果列表，每个元素是 dict：
@@ -62,6 +65,8 @@ def hybrid_search(
         return []
 
     # 1. 向量化查询
+    if progress_callback:
+        progress_callback("embedding")
     embeddings = embed([query])
     query_dense = embeddings[0].dense
     query_sparse = embeddings[0].sparse
@@ -87,6 +92,8 @@ def hybrid_search(
     )
 
     # 2. dense 检索（HNSW + COSINE）
+    if progress_callback:
+        progress_callback("dense")
     dense_results = client.search(
         collection_name=collection,
         data=[query_dense],
@@ -97,6 +104,8 @@ def hybrid_search(
     )
 
     # 3. sparse 检索（SPARSE_INVERTED_INDEX + IP）
+    if progress_callback:
+        progress_callback("sparse")
     sparse_results = client.search(
         collection_name=collection,
         data=[query_sparse],
@@ -142,6 +151,8 @@ def hybrid_search(
     # 6. 可选 rerank：对候选集做精排
     rerank_applied = False
     if enable_rerank and len(candidate_items) > top_k:
+        if progress_callback:
+            progress_callback("reranking")
         try:
             from app.services.retrieval.reranker import rerank
             texts = [entity_map[mid].get("text", "") for mid in candidate_items]

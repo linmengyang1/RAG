@@ -29,14 +29,14 @@ from app.services.llm.deepseek_client import get_llm_client
 # wiki 生成 prompt
 WIKI_GEN_PROMPT = """你是研究生院知识库管理员。请从以下文本中提取可沉淀的实体条目。
 仅提取以下三类：
-- person（导师姓名、领导姓名，含简介、研究方向、联系方式等）
-- policy（制度、规定、政策名称，含适用范围、要点等）
-- process（流程、步骤名称，含步骤、所需材料、办理方式等）
+- person（导师姓名、领导姓名，含简介、研究方向、联系方式、论文指导、职称等）
+- policy（制度、规定、政策名称，含适用范围、要点、生效时间等）
+- process（流程、步骤名称，含步骤、所需材料、办理方式、注意事项等）
 
-只提取明确出现的实体，不要编造。
+只提取明确出现的实体，不要编造。条目内容要尽可能丰富、结构化，包含文本中所有相关信息。
 
 输出严格 JSON 数组（无其他文字、无 markdown 代码块）：
-[{{"title": "实体名称（去重用，唯一）", "entry_type": "person|policy|process", "content_md": "条目内容（200 字以内，结构化）", "content_summary": "一句话摘要（50 字以内）"}}]
+[{{"title": "实体名称（去重用，唯一）", "entry_type": "person|policy|process", "content_md": "条目内容（800 字以内，markdown 结构化，可含小标题、列表）", "content_summary": "一句话摘要（150 字以内）", "college": "所属学院（如信息与通信工程学院，无则空字符串）", "subject": "学科方向（如无则空字符串）"}}]
 
 如果文本中没有可提取的实体，输出空数组 []。
 
@@ -44,10 +44,10 @@ WIKI_GEN_PROMPT = """你是研究生院知识库管理员。请从以下文本�
 {text}
 """
 
-# 每批 chunk 数量
-BATCH_SIZE = 10
-# 每批文本最大字符数（避免超过 LLM 上下文）
-MAX_BATCH_CHARS = 8000
+# 每批文档数量（每个文档是同 doc_id 的所有 chunk 拼接，文本量较大，需控制批大小）
+BATCH_SIZE = 3
+# 每批文本最大字符数（适当增大，容纳拼接后的完整文档）
+MAX_BATCH_CHARS = 12000
 
 
 def _parse_wiki_candidates(resp: str) -> list[dict]:
@@ -81,6 +81,9 @@ def _parse_wiki_candidates(resp: str) -> list[dict]:
                 "entry_type": entry_type,
                 "content_md": content_md,
                 "content_summary": str(item.get("content_summary", ""))[:500] or title,
+                # 新增分类字段（LLM 解析值，可为空字符串，写入时再 fallback 到批次元数据）
+                "college": str(item.get("college", "")).strip()[:128],
+                "subject": str(item.get("subject", "")).strip()[:128],
             })
         return result
     except Exception as e:
@@ -91,7 +94,12 @@ def _parse_wiki_candidates(resp: str) -> list[dict]:
 def _fetch_chunks_from_milvus(
     doc_ids: list[int] | None, limit: int
 ) -> list[dict]:
-    """从 Milvus chunks 集合查 chunk 全文"""
+    """从 Milvus chunks 集合查 chunk 全文，按 doc_id 分组拼接同文档所有 chunk
+
+    改造前：按 doc_id 去重只保留第一个 chunk（丢失约 85% 信息）
+    改造后：按 doc_id 分组，把同文档的所有 chunk 文本拼接成完整文档，
+            同时保留该文档的 category/college/subject 元数据
+    """
     client = get_client()
     collection = settings.milvus_collection_chunks
 
@@ -104,14 +112,58 @@ def _fetch_chunks_from_milvus(
     logger.info(
         f"查询 Milvus chunks: filter={filter_expr or '(无)'}, limit={limit}"
     )
+    # output_fields 增加 category/college/subject（用于 bwiki 分类导航）
     chunks = client.query(
         collection_name=collection,
         filter=filter_expr or None,
-        output_fields=["text", "doc_id"],
+        output_fields=["text", "doc_id", "category", "college", "subject"],
         limit=limit,
     )
     logger.info(f"查询到 {len(chunks)} 个 chunk")
-    return chunks
+
+    # 按 doc_id 分组，拼接同文档所有 chunk（保留完整信息）
+    # 同一文档的多个 chunk 共享相同的 category/college/subject 元数据
+    doc_groups: dict[int, dict] = {}
+    for c in chunks:
+        did = c.get("doc_id")
+        if did is None:
+            continue
+        if did not in doc_groups:
+            doc_groups[did] = {
+                "doc_id": did,
+                "texts": [],
+                "category": c.get("category") or "",
+                "college": c.get("college") or "",
+                "subject": c.get("subject") or "",
+            }
+        doc_groups[did]["texts"].append(c.get("text", ""))
+
+    # 拼接成文档级文本（按 Milvus query 返回顺序，即 chunk 切片顺序）
+    deduped: list[dict] = []
+    for did, g in doc_groups.items():
+        full_text = "\n\n".join(t for t in g["texts"] if t)
+        deduped.append({
+            "doc_id": did,
+            "text": full_text,
+            "category": g["category"],
+            "college": g["college"],
+            "subject": g["subject"],
+        })
+    logger.info(f"按 doc_id 分组拼接: {len(chunks)} chunk -> {len(deduped)} 文档")
+    return deduped
+
+
+def _batch_meta(batch: list[dict], key: str) -> str:
+    """从批次中第一个有该字段值的文档取元数据（category/college/subject）
+
+    LLM 解析的 college/subject 优先用，为空时 fallback 到批次中文档的元数据。
+    同一批次的文档通常属于同一 category/college（按摄入时的分类）。
+    """
+    for c in batch:
+        val = c.get(key)
+        if val:
+            return str(val)[:128] if key != "category" else str(val)[:64]
+    return ""
 
 
 async def generate_wiki_entries(
@@ -155,6 +207,13 @@ async def generate_wiki_entries(
             source_ids = list({c.get("doc_id") for c in batch if c.get("doc_id")})
             for cand in candidates:
                 cand["source_doc_ids"] = source_ids
+                # 标注批次分类元数据（LLM 解析值优先，为空则 fallback 到批次文档元数据）
+                if not cand.get("college"):
+                    cand["college"] = _batch_meta(batch, "college")
+                if not cand.get("subject"):
+                    cand["subject"] = _batch_meta(batch, "subject")
+                if not cand.get("category"):
+                    cand["category"] = _batch_meta(batch, "category")
             all_candidates.extend(candidates)
             logger.info(
                 f"wiki 批次 {i // BATCH_SIZE + 1}: 提取 {len(candidates)} 条候选"
@@ -196,6 +255,10 @@ async def generate_wiki_entries(
                 content_md=cand["content_md"],
                 content_summary=cand["content_summary"],
                 source_doc_ids=cand.get("source_doc_ids", []),
+                # 新增分类字段（已在上面的批处理中标注：LLM 解析值优先，fallback 到批次元数据）
+                college=cand.get("college") or None,
+                subject=cand.get("subject") or None,
+                category=cand.get("category") or None,
             )
             session.add(entry)
             new_entries.append(entry)
@@ -206,7 +269,10 @@ async def generate_wiki_entries(
 
         # 4. 计算向量 + 写 Milvus
         if new_entries:
-            texts = [e.content_summary or e.title for e in new_entries]
+            # 向量从 title + content_summary 拼接生成（包含人名信息，改善人名检索）
+            texts = [
+                f"{e.title}：{e.content_summary or ''}" for e in new_entries
+            ]
             embeddings = embed(texts)
             wiki_data = []
             for e, emb in zip(new_entries, embeddings):
@@ -216,6 +282,10 @@ async def generate_wiki_entries(
                     "entry_type": e.entry_type[:32],
                     "content": e.content_md[:32768],
                     "summary": (e.content_summary or "")[:1024],
+                    # 新增分类字段（bwiki 风格分类导航用）
+                    "category": (e.category or "")[:64],
+                    "college": (e.college or "")[:128],
+                    "subject": (e.subject or "")[:128],
                 })
 
             milvus_client = get_client()

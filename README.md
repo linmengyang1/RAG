@@ -184,7 +184,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 问答流程：意图识别（代词消解 + 意图分类，用 deepseek-v4-flash）→ 改写 query → 检索 top_k 相关 chunk（含 rerank）→ 拼接 context prompt（含历史 4 轮）→ 调 DeepSeek 生成答案 → 持久化多轮对话（Conversation/Message 表）→ 返回答案 + sources + rewritten_query + intent + conversation_id。
 
-支持多轮对话：携带 `conversation_id` 即可继续上一轮，系统自动拉历史 8 条做代词消解（"他/她/它"等指代消解）。返回的 `rewritten_query` 是消解后的查询，`intent` 是意图标签（导师查询/政策咨询/流程办理/招生信息/学位管理/奖学金/其他）。
+支持多轮对话：携带 `conversation_id` 即可继续上一轮，系统自动拉历史 8 条做代词消解（"他/她/它"等指代消解）。返回的 `rewritten_query` 是消解后的查询，`intent` 是意图标签（8 类：导师查询/统计查询/政策咨询/流程办理/招生信息/学位管理/奖学金/其他）。意图识别带 8 个 few-shot 示例和 confidence 阈值（<0.5 回退"其他"）；包含多个子问题时自动拆解为独立子问题分别检索后由 LLM 合并答案；输出长度按问题复杂度自动控制（简单≤200字/中等≤500字/统计不限）。
 
 ## 增强功能
 
@@ -205,9 +205,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ### 3. 意图识别 + 代词消解（多轮对话）
 
-- **意图识别**：用 deepseek-v4-flash 判断意图（7 类标签）
+- **意图识别**：用 deepseek-v4-flash 判断意图（8 类标签）+ 8 个 few-shot 示例 + confidence 阈值（<0.5 回退"其他"）
 - **代词消解**：拉历史 8 条消息，消解"他/她/它/这个/那个"等指代
 - **query 改写**：输出 `rewritten_query`，用于检索和生成
+- **多问题拆解**：子问题独立检索 → LLM 合并答案（`COMBINE_ANSWERS_PROMPT`）
+- **输出长度控制**：简单问题≤200字 / 中等≤500字 / 统计不限（`_get_length_hint`）
 - **持久化**：Conversation/Message 表，Message.trace JSONB 存 `{retrieved, wiki_used, intent, rewritten_query}`
 
 ### 4. LLM Wiki
@@ -222,13 +224,24 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 - **3 个 Tab**：
   - **检索 Tab**：query/top_k/category/rerank/wiki 开关，结果卡片显示检索方式标签 + 相似度进度条 + 原文位置
   - **问答 Tab**：多轮对话，显示 rewritten_query + intent + 答案 + sources
-  - **Wiki Tab**：列表/检索/生成 三子 Tab + 详情弹窗
+  - **Wiki Tab**：列表/检索 + 独立详情页（`/wiki/[id]`，支持 markdown 渲染 + 相关元数据）
 - **元数据展示**：每条结果卡片含：
   - 检索方式标签（向量检索=蓝 / 关键词检索=绿 / Wiki 沉淀=紫）
   - 相似度（rerank 分数优先，否则 RRF 分数）+ 进度条
   - 原文位置（doc_id + 页码 + 字符范围）
   - rerank 分数（如启用）
   - 分类/学院/学科
+
+### 6. SSE 流式问答（POST /api/v1/chat/stream）
+
+- **分阶段推送**：intent_done → retrieving → retrieving_stage（4 个子阶段）→ retrieved → generating → token（多次）→ done
+- **检索子阶段拆分**：retrieving_stage 事件推送 4 个子阶段进度：
+  - `embedding`：BGE-M3 向量化查询（~1.2s）
+  - `dense`：向量检索（HNSW + COSINE，~0.4s）
+  - `sparse`：关键词检索（BM25，~0.0s）
+  - `reranking`：rerank 精排（bge-reranker-v2-m3，~36s，硬件瓶颈）
+- **耗时显示**：每个 SSE 事件带 `elapsed_ms`（从请求开始累计），前端实时显示 + 完成后折叠卡片展示各阶段细分耗时
+- **关键技术**：hybrid_search 在 `asyncio.to_thread` 子线程运行，用 `asyncio.run_coroutine_threadsafe` 跨线程投递进度到主事件循环；Next.js 必须设置 `compress: false` 禁用 gzip（否则浏览器 reader.read() 解压阻塞，流式失效）
 
 ## 前端使用
 
@@ -253,58 +266,40 @@ cd frontend && npm install && npm run dev
 
 当前 `.env` 中 `AUTH_DISABLED=true`（测试期间免登录）。生产部署前改为 `false`，前端需在请求头加 `Authorization: Bearer <token>`。
 
-## 10% 数据测试
+## 数据摄入状态
 
-### 数据量
+全量数据已摄入完成。
 
-| 类型 | 路径 | 总数 | 10% 抽样 |
-|------|------|------|---------|
-| Markdown | `output/markdown/**/*.md` | 239 | 24 |
-| PDF | `output/files/**/*.pdf` | 436 | 44 |
-| DOCX | `output/files/**/*.docx` | 121 | 12 |
+| 表 | 数量 | 说明 |
+|----|------|------|
+| documents | **810** | 全量摄入完成，全部 status=embedded |
+| chunks | **5699** | 全量向量化完成，已入 Milvus |
+| wiki_entries | **1072** | 全量生成完成，person/policy/process 三类 |
+| mentors | **793** | 从 wiki person 反推构建，chunks.mentor_id 关联率 98.1% |
+| conversations | 3 | 会话历史（测试数据） |
+| messages | 84 | 对话消息 |
 
-测试时取 md 24 + pdf 5（pdf 取小样本避免 MinerU 配额耗尽）。
+### documents 分类分布
 
-### 完整测试流程
+| 分类 | 文档数 | 占比 |
+|------|--------|------|
+| 导师信息 | 380 | 46.9% |
+| 培养工作 | 209 | 25.8% |
+| 招生工作 | 119 | 14.7% |
+| 研工工作 | 95 | 11.7% |
+| 学位工作 | 0 | 0% |
+| 其他 | 17 | 2.1% |
+
+### 重新摄入
 
 ```bash
-# 1. 重建容器（应用新 Dockerfile + GPU 配置）
-make down
-make build
-make up
-make ps                    # 等所有 healthy
+# 全量重跑（跳过已摄入，幂等）
+docker compose exec backend python -m app.cli.ingest
 
-# 2. 重建 Milvus 集合（清空旧数据）
+# 强制清空重跑
 make init-milvus-force
-
-# 3. 跑摄入管线（md 24 + pdf 5）
-make ingest
-
-# 4. 验证摄入结果
-docker compose exec postgres psql -U grad -d grad_rag -c \
-  "SELECT status, COUNT(*) FROM documents GROUP BY status;"
-# 预期: embedded=29 行左右
-
-docker compose exec postgres psql -U grad -d grad_rag -c \
-  "SELECT COUNT(*) FROM chunks WHERE milvus_id IS NOT NULL;"
-# 预期: 200+ 行
-
-# 5. 测试检索
-TOKEN=$(curl -s -X POST http://localhost:18000/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"<密码>"}' \
-  | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-
-curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:18000/api/v1/search?q=导师&top_k=5"
-# 预期: 返回 5 条相关 chunk，score 递减
-
-# 6. 测试问答
-curl -X POST -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"question":"导师信息怎么查询？","top_k":5}' \
-  http://localhost:18000/api/v1/chat
-# 预期: 返回基于检索结果的答案 + sources
+docker compose exec postgres psql -U grad -d grad_rag -c "DELETE FROM chunks; DELETE FROM documents;"
+make ingest-all
 ```
 
 ## 目录结构
@@ -323,12 +318,13 @@ graduate-rag/
 │   └── app/
 │       ├── core/           # 配置 / 鉴权 / 日志
 │       ├── models/         # ORM 模型（Document / Chunk / User / Mentor）
-│       ├── api/v1/         # REST 接口（auth / search / chat）
+│       ├── api/v1/         # REST 接口（auth / search / chat / wiki / conversations）
 │       ├── services/
 │       │   ├── ingestion/  # scanner / markdown_parser / chunker / embedder / milvus_writer / pipeline / mineru_client
-│       │   ├── retrieval/  # hybrid_search（dense + sparse RRF 融合）
-│       │   ├── llm/        # DeepSeek API（deepseek_client.py）
-│       │   ├── wiki/       # 知识沉淀（P4）
+│       │   ├── retrieval/  # hybrid_search（dense + sparse RRF 融合 + rerank）
+│       │   ├── llm/        # DeepSeek API + 意图识别 + prompt 构建（含长度控制）
+│       │   ├── wiki/       # 知识沉淀（生成 + 检索）
+│       │   ├── mentor/     # 导师实体构建（从 wiki 反推 + chunks 关联）
 │       │   └── agent/      # LangGraph（P3）
 │       └── cli/            # CLI 入口（ingest.py）
 └── infra/
@@ -341,19 +337,25 @@ graduate-rag/
 
 数据位于 `../output/`（与项目并列），通过 docker-compose 只读挂载到容器 `/data/output`：
 
-- `markdown/` — 已抓取的网页正文（导师信息 189 / 研工工作 43 / 培养工作 4 / 招生工作 3）
+- `markdown/` — 已抓取的网页正文（导师信息 380 / 培养工作 209 / 招生工作 119 / 研工工作 95）
 - `files/` — 附件 PDF/DOCX（与 markdown 互补，独立摄入）
+- 全量 810 文档已经过 MinerU 解析 → BGE-M3 向量化 → 写入 Milvus + PG
 
 ## 实施阶段
 
 - [x] **P0** 基础设施：docker-compose + Milvus + PG + 占位 client + DeepSeek/MinerU 接入
 - [x] **P1** 数据接入管线：scanner + markdown_parser + chunker + embedder + milvus_writer + pipeline
 - [x] **P2** 检索层：Milvus hybrid search（dense + sparse RRF 融合）+ search/chat API
-- [x] **P3** LLM 增强：意图识别 + 代词消解 + 多轮对话（LangGraph Agent 待集成）
+- [x] **P3** LLM 增强：意图识别 + 代词消解 + 多轮对话 + SSE 流式问答
 - [x] **P4** Wiki 沉淀：Wiki 生成（v4-pro）+ Wiki 检索 + Wiki 管理 API
-- [x] **P5** Next.js 前端：3 Tab（检索/问答/Wiki）+ 元数据展示
-- [ ] **P6** RAGAS 评测
-- [ ] **P7** 加固
+- [x] **P5** Next.js 前端：3 Tab（检索/问答/Wiki）+ 元数据展示 + 流式思考过程 + 耗时卡片
+- [x] **P6** 全量摄入：810 文档 / 5699 chunks，全部 embedded
+- [ ] **P7** 加固（RAGAS 评测 + Reranker 优化 + 鉴权 UI + 监控）
+  - [x] Mentors 实体补全（793 导师，98.1% chunks 关联）
+  - [x] 会话管理 UI（CRUD + 侧边栏）
+  - [x] 意图 few-shot + confidence + 多问题拆解 + 长度控制
+
+> 项目完善计划详见 [.trae/documents/project-completion-plan.md](../.trae/documents/project-completion-plan.md)。当前数据摄入 810/810（全量完成）。
 
 ## API 接口一览
 
@@ -365,10 +367,15 @@ graduate-rag/
 | POST | `/api/v1/auth/login` | 登录获取 token | 否 |
 | GET | `/api/v1/search?q=xxx` | 混合检索（含 rerank/wiki 开关） | 是 |
 | POST | `/api/v1/chat` | RAG 问答（多轮对话 + 意图识别） | 是 |
+| POST | `/api/v1/chat/stream` | RAG 流式问答（SSE 分阶段推送 + 检索子阶段拆分） | 是 |
 | POST | `/api/v1/wiki/generate` | 触发 Wiki 生成 | 是(admin) |
 | GET | `/api/v1/wiki` | Wiki 列表（分页 + 类型过滤） | 是 |
 | GET | `/api/v1/wiki/search?q=` | Wiki 检索 | 是 |
 | GET | `/api/v1/wiki/{id}` | Wiki 详情 | 是 |
+| GET | `/api/v1/conversations` | 会话列表（分页） | 是 |
+| GET | `/api/v1/conversations/{id}` | 会话详情（含历史消息） | 是 |
+| PATCH | `/api/v1/conversations/{id}` | 重命名会话 | 是 |
+| DELETE | `/api/v1/conversations/{id}` | 删除会话（CASCADE messages） | 是 |
 
 ## 测试
 

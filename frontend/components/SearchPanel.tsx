@@ -78,7 +78,7 @@ export default function SearchPanel() {
             <input
               type="range"
               min={1}
-              max={20}
+              max={50}
               value={topK}
               onChange={(e) => setTopK(Number(e.target.value))}
               className="w-full accent-brand-600"

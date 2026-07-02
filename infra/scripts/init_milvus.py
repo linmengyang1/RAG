@@ -99,6 +99,10 @@ def create_wiki_collection(client: MilvusClient, name: str, dim: int) -> None:
     schema.add_field("entry_type", DataType.VARCHAR, max_length=32)
     schema.add_field("content", DataType.VARCHAR, max_length=32768)
     schema.add_field("summary", DataType.VARCHAR, max_length=1024)
+    # 新增分类元数据字段（bwiki 风格分类导航用）
+    schema.add_field("category", DataType.VARCHAR, max_length=64)
+    schema.add_field("college", DataType.VARCHAR, max_length=128)
+    schema.add_field("subject", DataType.VARCHAR, max_length=128)
 
     index_params = client.prepare_index_params()
     index_params.add_index(
@@ -108,6 +112,9 @@ def create_wiki_collection(client: MilvusClient, name: str, dim: int) -> None:
         params={"M": 16, "efConstruction": 256},
     )
     index_params.add_index(field_name="entry_type", index_type="", index_name="scalar_entry_type")
+    # 新增分类字段标量索引
+    index_params.add_index(field_name="college", index_type="", index_name="scalar_college")
+    index_params.add_index(field_name="category", index_type="", index_name="scalar_category")
 
     client.create_collection(
         collection_name=name,
@@ -146,6 +153,17 @@ def main() -> None:
     for c in cols:
         stats = client.get_collection_stats(c)
         print(f"  - {c}: {stats}")
+
+    # 加载集合到 QueryNode 内存（Milvus 重启后必须，否则检索报 collection on recovering）
+    # load_collection 不占磁盘，只把向量数据从 MinIO 读到 QueryNode RAM
+    for name in (chunks_name, wiki_name):
+        try:
+            print(f"[init_milvus] 加载集合到内存: {name} ...")
+            client.load_collection(name)
+            print(f"[init_milvus] {name} 已加载到内存")
+        except Exception as e:
+            # load 失败不影响集合创建，只是检索暂不可用（Milvus 未就绪时可能失败）
+            print(f"[init_milvus] 加载 {name} 失败（不影响集合创建）: {e}")
 
 
 if __name__ == "__main__":

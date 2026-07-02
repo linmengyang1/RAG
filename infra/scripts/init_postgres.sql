@@ -108,6 +108,25 @@ CREATE TABLE IF NOT EXISTS wiki_entries (
 CREATE INDEX IF NOT EXISTS idx_wiki_entries_type ON wiki_entries(entry_type);
 CREATE INDEX IF NOT EXISTS idx_wiki_entries_title_trgm ON wiki_entries USING gin (title gin_trgm_ops);
 
+-- wiki_entries 增加 category/college/subject 字段（幂等，用于 bwiki 风格分类导航）
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='wiki_entries' AND column_name='category') THEN
+    ALTER TABLE wiki_entries ADD COLUMN category VARCHAR(64);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='wiki_entries' AND column_name='college') THEN
+    ALTER TABLE wiki_entries ADD COLUMN college VARCHAR(128);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='wiki_entries' AND column_name='subject') THEN
+    ALTER TABLE wiki_entries ADD COLUMN subject VARCHAR(128);
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_wiki_entries_college ON wiki_entries(college);
+CREATE INDEX IF NOT EXISTS idx_wiki_entries_category ON wiki_entries(category);
+
 -- ───── Wiki 双向链接 ─────
 CREATE TABLE IF NOT EXISTS wiki_links (
     id            BIGSERIAL PRIMARY KEY,

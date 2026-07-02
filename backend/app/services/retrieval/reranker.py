@@ -58,7 +58,11 @@ def rerank(
     logger.info(f"rerank 开始: query={query[:50]!r}, docs={len(documents)}, top_k={top_k}")
 
     # compute_score: normalize=True 输出 sigmoid 归一化分数（0-1）
-    scores = model.compute_score(pairs, normalize=True)
+    # max_length=512：FlagReranker 用 dynamic padding（pad 到 batch 内最长），
+    # max_length 控制截断上限。长文档（>512 token）截断到 512 既能加速
+    # （30 文档 621 token：512=37s vs 1024=46s），又保留前 512 token 信息
+    # （中文约 340 字，通常覆盖文档核心内容）。
+    scores = model.compute_score(pairs, normalize=True, max_length=512)
     # 单条时 compute_score 返回 float，需归一化为 list
     if isinstance(scores, float):
         scores = [scores]

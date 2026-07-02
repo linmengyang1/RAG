@@ -63,6 +63,10 @@ class WikiItem(BaseModel):
     source_doc_ids: list[int] | None = None
     mention_count: int
     version: int
+    # 新增分类字段（bwiki 风格分类导航用）
+    category: str | None = None
+    college: str | None = None
+    subject: str | None = None
 
 
 class WikiListResponse(BaseModel):
@@ -82,6 +86,16 @@ class WikiSearchResultItem(BaseModel):
     summary: str
     score: float
     retrieval_sources: list[str] = ["wiki"]
+    # 新增分类字段（前端检索结果展示用）
+    category: str | None = None
+    college: str | None = None
+    subject: str | None = None
+
+
+class CollegeStat(BaseModel):
+    """学院分组统计（左侧导航用）"""
+    college: str
+    count: int
 
 
 class WikiSearchResponse(BaseModel):
@@ -105,18 +119,22 @@ async def generate(
 @router.get("", response_model=WikiListResponse)
 async def list_wiki(
     entry_type: str | None = Query(None, description="类型过滤 person/policy/process"),
+    college: str | None = Query(None, description="学院过滤（bwiki 分类导航用）"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """Wiki 条目列表（分页 + 类型过滤）"""
+    """Wiki 条目列表（分页 + 类型过滤 + 学院过滤）"""
     # 构造查询
     stmt = select(WikiEntry)
     count_stmt = select(func.count(WikiEntry.id))
     if entry_type:
         stmt = stmt.where(WikiEntry.entry_type == entry_type)
         count_stmt = count_stmt.where(WikiEntry.entry_type == entry_type)
+    if college:
+        stmt = stmt.where(WikiEntry.college == college)
+        count_stmt = count_stmt.where(WikiEntry.college == college)
 
     # 总数
     total = (await db.execute(count_stmt)).scalar_one()
@@ -136,6 +154,10 @@ async def list_wiki(
             source_doc_ids=e.source_doc_ids,
             mention_count=e.mention_count,
             version=e.version,
+            # 新增分类字段
+            category=e.category,
+            college=e.college,
+            subject=e.subject,
         )
         for e in result.scalars()
     ]
@@ -148,16 +170,86 @@ async def list_wiki(
 @router.get("/search", response_model=WikiSearchResponse)
 async def wiki_search(
     q: str = Query(..., min_length=1, description="查询文本"),
-    top_k: int = Query(5, ge=1, le=20, description="返回数量"),
+    top_k: int = Query(5, ge=1, le=50, description="返回数量"),
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
 ):
-    """在 Milvus wiki 集合做 dense 检索"""
-    results = search_wiki(q, top_k=top_k)
+    """Wiki 检索：title 模糊匹配优先 + Milvus dense 检索
+
+    检索策略（两路合并去重）：
+    1. title 模糊匹配：从 PG 查 title LIKE %q% 的条目（精确人名搜索优先）
+    2. dense 检索：Milvus 语义相似度检索
+    title 匹配的结果排前面（score=1.0），dense 结果排后面
+    """
+    # 1. title 模糊匹配（从 PG 查）
+    title_stmt = (
+        select(WikiEntry)
+        .where(WikiEntry.title.ilike(f"%{q}%"))
+        .order_by(WikiEntry.id)
+        .limit(top_k)
+    )
+    title_result = await db.execute(title_stmt)
+    title_entries = title_result.scalars().all()
+
+    merged: list[dict] = []
+    seen_titles: set[str] = set()
+    for e in title_entries:
+        merged.append({
+            "id": e.id,
+            "title": e.title,
+            "entry_type": e.entry_type,
+            "text": e.content_md,
+            "summary": e.content_summary or "",
+            "score": 1.0,
+            "retrieval_sources": ["wiki_title"],
+            # 新增分类字段
+            "category": e.category,
+            "college": e.college,
+            "subject": e.subject,
+        })
+        seen_titles.add(e.title)
+
+    # 2. dense 检索（Milvus），补充 title 匹配未覆盖的结果
+    remaining = top_k - len(merged)
+    if remaining > 0:
+        dense_results = search_wiki(q, top_k=max(remaining, top_k))
+        for r in dense_results:
+            if r["title"] not in seen_titles:
+                merged.append(r)
+                seen_titles.add(r["title"])
+            if len(merged) >= top_k:
+                break
+
     return WikiSearchResponse(
         query=q,
-        total=len(results),
-        results=[WikiSearchResultItem(**r) for r in results],
+        total=len(merged),
+        results=[WikiSearchResultItem(**r) for r in merged[:top_k]],
     )
+
+
+@router.get("/colleges", response_model=list[CollegeStat])
+async def list_colleges(
+    entry_type: str | None = Query(None, description="按类型过滤统计（person/policy/process）"),
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """返回所有学院及其条目数（bwiki 左侧分类导航用）
+
+    按 entry_type 过滤后统计各学院条目数，按数量降序排列。
+    """
+    stmt = (
+        select(WikiEntry.college, func.count(WikiEntry.id))
+        .where(WikiEntry.college.isnot(None))
+        .where(WikiEntry.college != "")
+        .group_by(WikiEntry.college)
+        .order_by(func.count(WikiEntry.id).desc())
+    )
+    if entry_type:
+        stmt = stmt.where(WikiEntry.entry_type == entry_type)
+    result = await db.execute(stmt)
+    return [
+        CollegeStat(college=r[0], count=r[1]) for r in result
+    ]
 
 
 @router.get("/{entry_id}", response_model=WikiItem)
@@ -179,4 +271,8 @@ async def get_wiki(
         source_doc_ids=entry.source_doc_ids,
         mention_count=entry.mention_count,
         version=entry.version,
+        # 新增分类字段
+        category=entry.category,
+        college=entry.college,
+        subject=entry.subject,
     )

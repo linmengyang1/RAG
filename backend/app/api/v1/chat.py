@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -40,9 +41,10 @@ from app.db.session import get_session
 from app.models.conversation import Conversation, Message
 from app.models.user import User
 from app.services.llm.deepseek_client import get_llm_client
-from app.services.llm.intent_recognition import recognize_intent
-from app.services.llm.prompt_builder import build_rag_prompt
+from app.services.llm.intent_recognition import COMBINE_ANSWERS_PROMPT, recognize_intent
+from app.services.llm.prompt_builder import build_rag_prompt, build_stats_prompt
 from app.services.retrieval.hybrid_search import hybrid_search
+from app.services.wiki.searcher import list_wiki_entries_by_type
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -50,7 +52,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class ChatRequest(BaseModel):
     """问答请求"""
     question: str = Field(..., min_length=1, description="用户问题")
-    top_k: int = Field(5, ge=1, le=20, description="检索 chunk 数量")
+    top_k: int = Field(5, ge=1, le=50, description="检索 chunk 数量")
     conversation_id: int | None = Field(
         None, description="会话 ID（不传则新建会话，多轮对话用）"
     )
@@ -96,6 +98,296 @@ LEGACY_PROMPT_TEMPLATE = """你是一个研究生院知识库助手。请基于�
 用户问题：{question}
 
 回答："""
+
+
+# 统计类查询的意图标签
+STATS_INTENT = "统计查询"
+
+
+async def _handle_multi_questions(
+    sub_questions: list[str],
+    history: list[dict],
+    top_k: int,
+    db: AsyncSession,
+) -> tuple[str, list[dict], dict]:
+    """处理多问题拆解：逐个子问题检索+生成，最后合并答案
+
+    Args:
+        sub_questions: 拆解后的子问题列表
+        history: 历史对话
+        top_k: 每个子问题的检索数量
+        db: 数据库会话
+
+    Returns:
+        (answer, results, trace)
+    """
+    logger.info(f"多问题拆解: 共 {len(sub_questions)} 个子问题")
+
+    answers_parts: list[str] = []
+    all_retrieved: list[dict] = []
+    combined_trace: dict = {
+        "retrieved": [],
+        "wiki_used": False,
+        "intent": "多问题",
+        "sub_questions": sub_questions,
+    }
+
+    for i, sq in enumerate(sub_questions, 1):
+        logger.info(f"处理子问题 [{i}/{len(sub_questions)}]: {sq[:50]!r}")
+
+        try:
+            # 识别子问题的意图
+            sq_intent_result = await recognize_intent(sq, history)
+            sq_intent = sq_intent_result["intent"]
+            sq_rewritten = sq_intent_result["rewritten_query"]
+
+            # 根据意图选择检索方式
+            if sq_intent == STATS_INTENT:
+                sub_answer, sub_results, _ = await _handle_stats_query(
+                    rewritten_query=sq_rewritten,
+                    intent=sq_intent,
+                    history=history,
+                    top_k=top_k,
+                    db=db,
+                )
+            else:
+                sub_results = await asyncio.to_thread(
+                    hybrid_search,
+                    sq_rewritten,
+                    top_k=top_k,
+                    enable_rerank=False,
+                    enable_wiki=False,
+                )
+                if not sub_results:
+                    sub_answer = f"未检索到与「{sq}」相关的资料。"
+                else:
+                    prompt = build_rag_prompt(
+                        question=sq_rewritten,
+                        context=sub_results,
+                        history=history,
+                        intent=sq_intent,
+                    )
+                    sub_answer = await get_llm_client().generate(
+                        prompt, model=settings.deepseek_main_model
+                    )
+
+            answers_parts.append(f"### {sq}\n\n{sub_answer}")
+            all_retrieved.extend(sub_results or [])
+
+            # 累计 trace 的 retrieved
+            for r in sub_results or []:
+                combined_trace["retrieved"].append({
+                    "doc_id": r.get("doc_id"),
+                    "score": r.get("score"),
+                    "retrieval_sources": r.get("retrieval_sources", []),
+                })
+
+        except Exception as e:
+            logger.error(f"子问题 [{i}] 处理失败: {e}")
+            answers_parts.append(f"### {sq}\n\n处理该问题时出现错误：{e}")
+
+    # 合并答案
+    if len(answers_parts) == 1:
+        final_answer = answers_parts[0]
+    else:
+        # 用 LLM 合并多个子答案
+        answers_block = "\n\n---\n\n".join(answers_parts)
+        combine_prompt = COMBINE_ANSWERS_PROMPT.format(answers_block=answers_block)
+        try:
+            final_answer = await get_llm_client().generate(
+                combine_prompt, model=settings.deepseek_main_model
+            )
+        except Exception:
+            # 合并失败，直接拼接
+            final_answer = "\n\n".join(answers_parts)
+
+    # 去重 results
+    seen_ids = set()
+    unique_results = []
+    for r in all_retrieved:
+        rid = r.get("id") or r.get("doc_id")
+        if rid not in seen_ids:
+            seen_ids.add(rid)
+            unique_results.append(r)
+
+    logger.info(f"多问题处理完成: {len(answers_parts)} 个子问题, {len(unique_results)} 条检索结果")
+    return final_answer, unique_results, combined_trace
+
+
+async def _handle_stats_query(
+    rewritten_query: str,
+    intent: str,
+    history: list[dict],
+    top_k: int,
+    db: AsyncSession,
+) -> tuple[str, list[dict], dict]:
+    """处理统计类查询：优先用 Mentor 表聚合，wiki person 作为兜底
+
+    统计类问题（如"一共有多少导师"）需要全量数据做聚合。
+    优先从 Mentor + MentorIdentity 表查询（结构化数据，更精准），
+    mentors 表为空时回退到 wiki person 条目。
+
+    Args:
+        rewritten_query: 改写后的查询（无代词）
+        intent: 意图标签
+        history: 历史对话
+        top_k: sources 展示数量上限
+        db: 数据库会话
+
+    Returns:
+        (answer, results, trace)
+    """
+    # 尝试从 Mentor + MentorIdentity 聚合统计
+    mentor_stats = await _get_mentor_stats(db)
+
+    if mentor_stats:
+        # 有 mentor 数据，用结构化数据做统计
+        prompt = build_stats_prompt(
+            question=rewritten_query,
+            wiki_entries=mentor_stats,
+            history=history,
+            intent=intent,
+        )
+        answer = await get_llm_client().generate(
+            prompt, model=settings.deepseek_main_model
+        )
+
+        results = [
+            {
+                "text": e["content_md"][:500],
+                "title": e["title"],
+                "score": 1.0,
+                "retrieval_sources": ["mentor_stats"],
+            }
+            for e in mentor_stats[:top_k]
+        ]
+        trace = {
+            "retrieved": [
+                {"doc_id": None, "score": 1.0, "retrieval_sources": ["mentor_stats"]}
+                for _ in results
+            ],
+            "wiki_used": False,
+            "wiki_stats": False,
+            "mentor_stats": True,
+            "mentor_total": len(mentor_stats),
+            "intent": intent,
+            "rewritten_query": rewritten_query,
+        }
+        logger.info(
+            f"统计查询完成(mentor): total={len(mentor_stats)}, "
+            f"answer_len={len(answer)}"
+        )
+        return answer, results, trace
+
+    # 回退到 wiki person 条目
+    wiki_entries = await list_wiki_entries_by_type("person")
+
+    if not wiki_entries:
+        answer = "知识库中暂无导师条目，无法统计。请先摄入导师数据并生成 wiki。"
+        trace = {
+            "retrieved": [],
+            "wiki_used": False,
+            "wiki_stats": True,
+            "intent": intent,
+            "rewritten_query": rewritten_query,
+        }
+        return answer, [], trace
+
+    prompt = build_stats_prompt(
+        question=rewritten_query,
+        wiki_entries=wiki_entries,
+        history=history,
+        intent=intent,
+    )
+    answer = await get_llm_client().generate(
+        prompt, model=settings.deepseek_main_model
+    )
+
+    results = [
+        {
+            "text": e["content_md"][:500],
+            "title": e["title"],
+            "score": 1.0,
+            "retrieval_sources": ["wiki_stats"],
+        }
+        for e in wiki_entries[:top_k]
+    ]
+    trace = {
+        "retrieved": [
+            {"doc_id": None, "score": 1.0, "retrieval_sources": ["wiki_stats"]}
+            for _ in results
+        ],
+        "wiki_used": True,
+        "wiki_stats": True,
+        "wiki_total": len(wiki_entries),
+        "intent": intent,
+        "rewritten_query": rewritten_query,
+    }
+    logger.info(
+        f"统计查询完成(wiki): wiki_total={len(wiki_entries)}, "
+        f"answer_len={len(answer)}"
+    )
+    return answer, results, trace
+
+
+async def _get_mentor_stats(db: AsyncSession) -> list[dict]:
+    """从 Mentor + MentorIdentity 表聚合导师统计数据
+
+    返回与 wiki_entries 格式兼容的 dict 列表，供 build_stats_prompt 使用。
+    如果 mentors 表为空则返回空列表。
+    """
+    from app.models.mentor import Mentor, MentorIdentity
+
+    stmt = select(Mentor).order_by(Mentor.id).limit(2000)
+    result = await db.execute(stmt)
+    mentors = result.scalars().all()
+
+    if not mentors:
+        return []
+
+    out: list[dict] = []
+    for m in mentors:
+        # 聚合该导师的所有身份信息
+        identities = await db.execute(
+            select(MentorIdentity).where(MentorIdentity.mentor_id == m.id)
+        )
+        ident_list = identities.scalars().all()
+
+        colleges = list({i.college for i in ident_list if i.college})
+        subjects = list({i.subject_direction for i in ident_list if i.subject_direction})
+        titles = list({i.title for i in ident_list if i.title})
+
+        # 构造 content_md：结构化展示导师信息
+        parts = [f"姓名：{m.name}"]
+        if m.birth_year:
+            parts.append(f"出生年份：{m.birth_year}")
+        if m.gender:
+            parts.append(f"性别：{m.gender}")
+        if colleges:
+            parts.append(f"所属学院：{', '.join(colleges)}")
+        if subjects:
+            parts.append(f"学科方向：{', '.join(subjects)}")
+        if titles:
+            parts.append(f"职称：{', '.join(titles)}")
+
+        content_md = "；".join(parts)
+        content_summary = f"{m.name}"
+        if colleges:
+            content_summary += f"，{colleges[0]}"
+        if titles:
+            content_summary += f"，{titles[0]}"
+
+        out.append({
+            "id": m.id,
+            "title": m.name,
+            "entry_type": "person",
+            "content_md": content_md,
+            "content_summary": content_summary,
+            "source_doc_ids": [],
+            "retrieval_sources": ["mentor_stats"],
+        })
+
+    return out
 
 
 @router.post("", response_model=ChatResponse)
@@ -148,64 +440,83 @@ async def chat(
         for m in history_result.scalars()
     ]
 
-    # 4. 意图识别 + query 改写（代词消解）
+    # 4. 意图识别 + query 改写（代词消解）+ 多问题检测
     intent_result = await recognize_intent(req.question, history)
     rewritten_query = intent_result["rewritten_query"]
     intent = intent_result["intent"]
+    sub_questions = intent_result.get("sub_questions") or []
 
     logger.info(
         f"chat 改写: original={req.question[:50]!r}, "
-        f"rewritten={rewritten_query[:50]!r}, intent={intent}"
+        f"rewritten={rewritten_query[:50]!r}, intent={intent}, "
+        f"sub_questions={len(sub_questions)}"
     )
 
-    # 5. 检索相关 chunk（用改写后的 query）
-    # 整个 hybrid_search（含 embed + milvus 检索 + rerank）放线程池，
-    # 避免 reranker 推理阻塞事件循环导致 /health 端点超时无响应
-    results = await asyncio.to_thread(
-        hybrid_search,
-        rewritten_query,
-        top_k=req.top_k,
-        enable_rerank=req.enable_rerank,
-        enable_wiki=req.enable_wiki,
-    )
-
-    if not results:
-        answer = "未检索到相关资料，无法回答。"
-        trace = {
-            "retrieved": [],
-            "wiki_used": False,
-            "intent": intent,
-            "rewritten_query": rewritten_query,
-        }
-    else:
-        # 6. 拼 prompt（含 history + context + intent）
-        prompt = build_rag_prompt(
-            question=rewritten_query,
-            context=results,
+    # 5. 检索 + 生成
+    if sub_questions and len(sub_questions) > 1:
+        # 多问题拆解：逐个子问题检索+生成，最后合并
+        answer, results, trace = await _handle_multi_questions(
+            sub_questions=sub_questions,
             history=history,
+            top_k=req.top_k,
+            db=db,
+        )
+    elif intent == STATS_INTENT:
+        answer, results, trace = await _handle_stats_query(
+            rewritten_query=rewritten_query,
             intent=intent,
+            history=history,
+            top_k=req.top_k,
+            db=db,
+        )
+    else:
+        # 整个 hybrid_search（含 embed + milvus 检索 + rerank）放线程池，
+        # 避免 reranker 推理阻塞事件循环导致 /health 端点超时无响应
+        results = await asyncio.to_thread(
+            hybrid_search,
+            rewritten_query,
+            top_k=req.top_k,
+            enable_rerank=req.enable_rerank,
+            enable_wiki=req.enable_wiki,
         )
 
-        # 7. 调 DeepSeek 生成（显式传 main_model，不走 generate 默认 wiki_model）
-        answer = await get_llm_client().generate(
-            prompt, model=settings.deepseek_main_model
-        )
+        if not results:
+            answer = "未检索到相关资料，无法回答。"
+            trace = {
+                "retrieved": [],
+                "wiki_used": False,
+                "intent": intent,
+                "rewritten_query": rewritten_query,
+            }
+        else:
+            # 6. 拼 prompt（含 history + context + intent）
+            prompt = build_rag_prompt(
+                question=rewritten_query,
+                context=results,
+                history=history,
+                intent=intent,
+            )
 
-        trace = {
-            "retrieved": [
-                {
-                    "doc_id": r.get("doc_id"),
-                    "score": r.get("score"),
-                    "retrieval_sources": r.get("retrieval_sources", []),
-                }
-                for r in results
-            ],
-            "wiki_used": any(
-                "wiki" in r.get("retrieval_sources", []) for r in results
-            ),
-            "intent": intent,
-            "rewritten_query": rewritten_query,
-        }
+            # 7. 调 DeepSeek 生成（显式传 main_model，不走 generate 默认 wiki_model）
+            answer = await get_llm_client().generate(
+                prompt, model=settings.deepseek_main_model
+            )
+
+            trace = {
+                "retrieved": [
+                    {
+                        "doc_id": r.get("doc_id"),
+                        "score": r.get("score"),
+                        "retrieval_sources": r.get("retrieval_sources", []),
+                    }
+                    for r in results
+                ],
+                "wiki_used": any(
+                    "wiki" in r.get("retrieval_sources", []) for r in results
+                ),
+                "intent": intent,
+                "rewritten_query": rewritten_query,
+            }
 
     # 8. 写 assistant message（含 trace）
     assistant_msg = Message(
@@ -275,6 +586,12 @@ async def chat_stream(
         error         {detail}                        异常
     """
     async def event_gen():
+        # 各阶段累计耗时（从请求开始算），随每个 SSE 事件返回前端
+        t0 = time.monotonic()
+
+        def elapsed_ms() -> int:
+            return int((time.monotonic() - t0) * 1000)
+
         try:
             # 1. 解析/创建 conversation
             if req.conversation_id:
@@ -313,63 +630,143 @@ async def chat_stream(
                 for m in history_result.scalars()
             ]
 
-            # 4. 意图识别 + query 改写（代词消解）
+            # 4. 意图识别 + query 改写（代词消解）+ 多问题检测
             intent_result = await recognize_intent(req.question, history)
             rewritten_query = intent_result["rewritten_query"]
             intent = intent_result["intent"]
+            sub_questions = intent_result.get("sub_questions") or []
             yield _sse("intent_done", {
                 "intent": intent,
                 "rewritten_query": rewritten_query,
+                "sub_questions": sub_questions,
+                "elapsed_ms": elapsed_ms(),
             })
 
-            # 5. 检索（放线程池，避免 reranker 推理阻塞事件循环）
-            yield _sse("retrieving", {})
-            results = await asyncio.to_thread(
-                hybrid_search,
-                rewritten_query,
-                top_k=req.top_k,
-                enable_rerank=req.enable_rerank,
-                enable_wiki=req.enable_wiki,
-            )
-            yield _sse("retrieved", {"sources_count": len(results)})
-
-            # 6. 拼 prompt + 流式生成
-            if not results:
-                answer = "未检索到相关资料，无法回答。"
+            # 5. 检索或统计
+            # 多问题拆解：降级为非流式处理
+            if sub_questions and len(sub_questions) > 1:
+                yield _sse("retrieving", {"elapsed_ms": elapsed_ms()})
+                answer, results, trace = await _handle_multi_questions(
+                    sub_questions=sub_questions,
+                    history=history,
+                    top_k=req.top_k,
+                    db=db,
+                )
+                yield _sse("retrieved", {
+                    "sources_count": len(results),
+                    "elapsed_ms": elapsed_ms(),
+                })
+                yield _sse("generating", {"elapsed_ms": elapsed_ms()})
+                yield _sse("token", {"delta": answer})
+            elif intent == STATS_INTENT:
+                yield _sse("retrieving", {"elapsed_ms": elapsed_ms()})
+                answer, results, trace = await _handle_stats_query(
+                    rewritten_query=rewritten_query,
+                    intent=intent,
+                    history=history,
+                    top_k=req.top_k,
+                    db=db,
+                )
+                yield _sse("retrieved", {
+                    "sources_count": len(results),
+                    "elapsed_ms": elapsed_ms(),
+                })
+                yield _sse("generating", {"elapsed_ms": elapsed_ms()})
+                # 统计类用非流式生成，一次性推送完整 answer
                 yield _sse("token", {"delta": answer})
             else:
-                prompt = build_rag_prompt(
-                    question=rewritten_query,
-                    context=results,
-                    history=history,
-                    intent=intent,
+                # 原流程：hybrid_search 检索 + 流式生成
+                # 用 progress_callback + asyncio.Queue 把检索子阶段进度流式推送给前端
+                yield _sse("retrieving", {"elapsed_ms": elapsed_ms()})
+
+                loop = asyncio.get_running_loop()
+                progress_queue: asyncio.Queue = asyncio.Queue()
+
+                def progress_callback(stage: str):
+                    """从子线程安全投递检索阶段进度到主事件循环"""
+                    asyncio.run_coroutine_threadsafe(progress_queue.put(stage), loop)
+
+                # 启动检索任务（并发运行，期间可继续 yield SSE 推送子阶段进度）
+                search_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        hybrid_search,
+                        rewritten_query,
+                        top_k=req.top_k,
+                        enable_rerank=req.enable_rerank,
+                        enable_wiki=req.enable_wiki,
+                        progress_callback=progress_callback,
+                    )
                 )
-                yield _sse("generating", {})
-                answer_parts: list[str] = []
-                async for delta in get_llm_client().chat_stream(
-                    [{"role": "user", "content": prompt}],
-                    model=settings.deepseek_main_model,
-                ):
-                    answer_parts.append(delta)
-                    yield _sse("token", {"delta": delta})
-                answer = "".join(answer_parts)
+
+                # 持续读取子阶段进度，推送 retrieving_stage 事件
+                while not search_task.done():
+                    get_task = asyncio.create_task(progress_queue.get())
+                    done, _ = await asyncio.wait(
+                        {search_task, get_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if get_task in done:
+                        sub_stage = get_task.result()
+                        yield _sse("retrieving_stage", {
+                            "stage": sub_stage,
+                            "elapsed_ms": elapsed_ms(),
+                        })
+                    else:
+                        get_task.cancel()
+
+                # 排空 queue 剩余进度（search_task 完成后可能还有未读的回调）
+                while not progress_queue.empty():
+                    sub_stage = progress_queue.get_nowait()
+                    yield _sse("retrieving_stage", {
+                        "stage": sub_stage,
+                        "elapsed_ms": elapsed_ms(),
+                    })
+
+                results = await search_task
+                yield _sse("retrieved", {
+                    "sources_count": len(results),
+                    "elapsed_ms": elapsed_ms(),
+                })
+
+                # 6. 拼 prompt + 流式生成
+                if not results:
+                    answer = "未检索到相关资料，无法回答。"
+                    yield _sse("token", {"delta": answer})
+                else:
+                    prompt = build_rag_prompt(
+                        question=rewritten_query,
+                        context=results,
+                        history=history,
+                        intent=intent,
+                    )
+                    yield _sse("generating", {"elapsed_ms": elapsed_ms()})
+                    answer_parts: list[str] = []
+                    async for delta in get_llm_client().chat_stream(
+                        [{"role": "user", "content": prompt}],
+                        model=settings.deepseek_main_model,
+                    ):
+                        answer_parts.append(delta)
+                        yield _sse("token", {"delta": delta})
+                    answer = "".join(answer_parts)
 
             # 7. 写 assistant message（含 trace）
-            trace = {
-                "retrieved": [
-                    {
-                        "doc_id": r.get("doc_id"),
-                        "score": r.get("score"),
-                        "retrieval_sources": r.get("retrieval_sources", []),
-                    }
-                    for r in results
-                ],
-                "wiki_used": any(
-                    "wiki" in r.get("retrieval_sources", []) for r in results
-                ),
-                "intent": intent,
-                "rewritten_query": rewritten_query,
-            }
+            # 统计类的 trace 已由 _handle_stats_query 返回，非统计类在此构建
+            if intent != STATS_INTENT:
+                trace = {
+                    "retrieved": [
+                        {
+                            "doc_id": r.get("doc_id"),
+                            "score": r.get("score"),
+                            "retrieval_sources": r.get("retrieval_sources", []),
+                        }
+                        for r in results
+                    ],
+                    "wiki_used": any(
+                        "wiki" in r.get("retrieval_sources", []) for r in results
+                    ),
+                    "intent": intent,
+                    "rewritten_query": rewritten_query,
+                }
             assistant_msg = Message(
                 conversation_id=conv.id,
                 role="assistant",
@@ -385,10 +782,12 @@ async def chat_stream(
 
             # 8. done（含完整 sources 供前端展示）
             yield _sse("done", {
+                "elapsed_ms": elapsed_ms(),
                 "conversation_id": conv.id,
                 "intent": intent,
                 "rewritten_query": rewritten_query,
                 "answer": answer,
+                "trace": trace,
                 "sources": [
                     {
                         "text": r["text"][:500],

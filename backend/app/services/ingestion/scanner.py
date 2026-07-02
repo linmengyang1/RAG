@@ -115,11 +115,16 @@ def scan(
     logger.info(f"开始扫描: md_dir={md_dir}, files_dir={files_dir}")
 
     md_results = _scan_dir(md_dir, DOC_SOURCE_WEB_MD, (".md",), limit_md)
-    pdf_results = _scan_dir(files_dir, DOC_SOURCE_ATTACHMENT, (".pdf", ".docx"), limit_pdf)
+    # files/ 下支持 pdf/docx/doc/xls/xlsx（doc/docx/xls/xlsx 统一走 MinerU 解析）
+    pdf_results = _scan_dir(
+        files_dir, DOC_SOURCE_ATTACHMENT,
+        (".pdf", ".docx", ".doc", ".xls", ".xlsx"),
+        limit_pdf,
+    )
 
     all_results = md_results + pdf_results
     logger.info(
-        f"扫描完成: md={len(md_results)}, pdf/docx={len(pdf_results)}, "
+        f"扫描完成: md={len(md_results)}, files={len(pdf_results)}, "
         f"总计={len(all_results)}"
     )
     return all_results

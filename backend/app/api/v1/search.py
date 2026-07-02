@@ -57,7 +57,7 @@ class SearchResponse(BaseModel):
 @router.get("", response_model=SearchResponse)
 async def search(
     q: str = Query(..., min_length=1, description="查询文本"),
-    top_k: int = Query(5, ge=1, le=20, description="返回数量"),
+    top_k: int = Query(5, ge=1, le=50, description="返回数量"),
     category: str | None = Query(None, description="分类过滤（如 导师信息）"),
     enable_rerank: bool = Query(True, description="是否启用 rerank 精排"),
     enable_wiki: bool = Query(False, description="是否启用 wiki 第三路检索"),
