@@ -178,5 +178,125 @@
     "ground_truth": "实验室安全管理的规范要求和注意事项",
     "intent": "其他",
     "category": "研工工作"
+  },
+  {
+    "question": "计算机学院有哪些导师",
+    "ground_truth": "计算机学院的导师名单，包括姓名、职称、研究方向等信息",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "材料学院的导师名单",
+    "ground_truth": "材料学院的导师列表，包括导师姓名和基本信息",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "自动化学院博士生导师有哪些",
+    "ground_truth": "自动化学院的博士生导师名单及职称信息",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "研究方向是机器学习的导师",
+    "ground_truth": "研究方向包含机器学习/人工智能的导师名单",
+    "intent": "导师查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "各学院博士生导师数量统计",
+    "ground_truth": "各学院的博士生导师数量统计",
+    "intent": "统计查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "教授和副教授各有多少人",
+    "ground_truth": "教授和副教授职称的导师数量统计",
+    "intent": "统计查询",
+    "category": "导师信息"
+  },
+  {
+    "question": "研究生学制是几年",
+    "ground_truth": "硕士和博士研究生的学制年限",
+    "intent": "政策咨询",
+    "category": "培养工作"
+  },
+  {
+    "question": "研究生休学需要什么手续",
+    "ground_truth": "研究生休学的申请条件、审批流程和所需材料",
+    "intent": "政策咨询",
+    "category": "培养工作"
+  },
+  {
+    "question": "研究生毕业学分要求",
+    "ground_truth": "研究生毕业所需的学分数和课程要求",
+    "intent": "政策咨询",
+    "category": "培养工作"
+  },
+  {
+    "question": "研究生违纪处分规定",
+    "ground_truth": "研究生违纪行为的处分种类和适用情形",
+    "intent": "政策咨询",
+    "category": "研工工作"
+  },
+  {
+    "question": "中期考核流程",
+    "ground_truth": "研究生中期考核的时间、流程和考核要求",
+    "intent": "流程办理",
+    "category": "培养工作"
+  },
+  {
+    "question": "论文查重要求",
+    "ground_truth": "学位论文查重的重复率标准和查重流程",
+    "intent": "流程办理",
+    "category": "学位工作"
+  },
+  {
+    "question": "答辩申请流程是什么",
+    "ground_truth": "论文答辩申请的流程步骤和所需提交的材料",
+    "intent": "流程办理",
+    "category": "学位工作"
+  },
+  {
+    "question": "调剂条件是什么",
+    "ground_truth": "研究生调剂的申请条件和资格要求",
+    "intent": "招生信息",
+    "category": "招生工作"
+  },
+  {
+    "question": "推免生名额有多少",
+    "ground_truth": "推免生的名额数量和分配情况",
+    "intent": "招生信息",
+    "category": "招生工作"
+  },
+  {
+    "question": "预答辩要求",
+    "ground_truth": "预答辩的参加条件、流程和通过标准",
+    "intent": "学位管理",
+    "category": "学位工作"
+  },
+  {
+    "question": "学术不端处理办法",
+    "ground_truth": "学术不端行为的认定和处理办法",
+    "intent": "学位管理",
+    "category": "学位工作"
+  },
+  {
+    "question": "企业奖学金有哪些",
+    "ground_truth": "企业奖学金的种类、金额和申请条件",
+    "intent": "奖学金",
+    "category": "研工工作"
+  },
+  {
+    "question": "助研岗位津贴标准",
+    "ground_truth": "助研岗位的津贴标准和申请方式",
+    "intent": "奖学金",
+    "category": "研工工作"
+  },
+  {
+    "question": "研究生选课流程",
+    "ground_truth": "研究生选课的操作流程、时间和注意事项",
+    "intent": "其他",
+    "category": "培养工作"
   }
 ]
