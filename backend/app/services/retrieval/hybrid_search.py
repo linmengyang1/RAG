@@ -83,8 +83,10 @@ def hybrid_search(
         "text", "doc_id", "category", "college", "subject",
         "source_url", "page_num", "char_start", "char_end",
     ]
-    # 召回量：保证 rerank 前候选集 >= 30（用户要求 K=30）
-    search_limit = max(top_k * 6, 30)
+    # 候选集：下限 30 保召回，上限 50 防 top_k 大时候选爆炸
+    # rerank 耗时随候选数线性增长（30 条约 36s），若用 max(top_k*6,30) 则
+    # top_k=50 时候选 300、rerank 约 360s，故加上限 50 稳定在 36-60s
+    search_limit = min(max(top_k * 2, 30), 50)
 
     logger.info(
         f"hybrid_search: query={query[:50]!r}, top_k={top_k}, "
