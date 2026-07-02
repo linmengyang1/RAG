@@ -473,20 +473,35 @@ async def _get_mentor_aggregates(db: AsyncSession) -> dict:
     if total == 0:
         return {}
 
-    async def _group_count(field) -> list[dict]:
-        """按指定字段分组统计 DISTINCT mentor_id 数量，按数量降序"""
+    async def _group_count(field, group_expr=None) -> list[dict]:
+        """按指定字段分组统计 DISTINCT mentor_id 数量，按数量降序
+
+        Args:
+            field: 用于 WHERE 过滤的字段（过滤 NULL/空串）
+            group_expr: 用于 SELECT/GROUP BY 的表达式，默认=field。
+                可传入清洗后的表达式，如对 title 用 regexp_replace
+                去掉 markdown 残留（'** 教授' → '教授'）。
+        """
+        if group_expr is None:
+            group_expr = field
         stmt = (
-            select(field, func.count(func.distinct(MentorIdentity.mentor_id)))
+            select(group_expr, func.count(func.distinct(MentorIdentity.mentor_id)))
             .where(field.isnot(None))
             .where(field != "")
-            .group_by(field)
+            .group_by(group_expr)
             .order_by(func.count(func.distinct(MentorIdentity.mentor_id)).desc())
         )
         rows = (await db.execute(stmt)).all()
         return [{"key": k, "count": int(c)} for k, c in rows if k]
 
     by_college = await _group_count(MentorIdentity.college)
-    by_title = await _group_count(MentorIdentity.title)
+    # title 字段有 markdown 残留（如 '** 教授'），用正则去掉开头的 * 和空白后分组
+    # 正则 '^[*]+[[:space:]]*' 锚定开头，匹配一个或多个 * 加可选空白
+    # 清洗后 '** 教授'(20人) 会并入 '教授'(254人)，分组更干净
+    cleaned_title = func.regexp_replace(
+        MentorIdentity.title, '^[*]+[[:space:]]*', ''
+    )
+    by_title = await _group_count(MentorIdentity.title, group_expr=cleaned_title)
     by_subject = await _group_count(MentorIdentity.subject_direction)
 
     return {
