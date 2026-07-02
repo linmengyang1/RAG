@@ -31,7 +31,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -42,7 +42,11 @@ from app.models.conversation import Conversation, Message
 from app.models.user import User
 from app.services.llm.deepseek_client import get_llm_client
 from app.services.llm.intent_recognition import COMBINE_ANSWERS_PROMPT, recognize_intent
-from app.services.llm.prompt_builder import build_rag_prompt, build_stats_prompt
+from app.services.llm.prompt_builder import (
+    build_rag_prompt,
+    build_stats_prompt,
+    build_stats_aggregate_prompt,
+)
 from app.services.retrieval.hybrid_search import hybrid_search
 from app.services.wiki.searcher import list_wiki_entries_by_type
 
@@ -221,11 +225,12 @@ async def _handle_stats_query(
     top_k: int,
     db: AsyncSession,
 ) -> tuple[str, list[dict], dict]:
-    """处理统计类查询：优先用 Mentor 表聚合，wiki person 作为兜底
+    """处理统计类查询：三层策略，SQL 聚合优先
 
-    统计类问题（如"一共有多少导师"）需要全量数据做聚合。
-    优先从 Mentor + MentorIdentity 表查询（结构化数据，更精准），
-    mentors 表为空时回退到 wiki person 条目。
+    统计类问题（如"一共有多少导师"）需要全量数据做聚合。三层兜底策略：
+    1. 【优先】SQL 聚合查询：COUNT/GROUP BY 算好数字让 LLM 润色（真统计，无幻觉）
+    2. 【兜底1】拉全量 mentor 文本：让 LLM 数数（伪统计，mentors 表有数据时用）
+    3. 【兜底2】wiki person 条目：让 LLM 数数（mentors 表为空时用）
 
     Args:
         rewritten_query: 改写后的查询（无代词）
@@ -237,7 +242,60 @@ async def _handle_stats_query(
     Returns:
         (answer, results, trace)
     """
-    # 尝试从 Mentor + MentorIdentity 聚合统计
+    # 优先：SQL 聚合查询（真统计，让 LLM 润色而非数数）
+    try:
+        aggregates = await _get_mentor_aggregates(db)
+    except Exception as e:
+        logger.error(f"SQL 聚合查询失败，回退到 _get_mentor_stats: {e}")
+        aggregates = {}
+
+    if aggregates:
+        prompt = build_stats_aggregate_prompt(
+            question=rewritten_query,
+            aggregates=aggregates,
+            history=history,
+            intent=intent,
+        )
+        answer = await get_llm_client().generate(
+            prompt, model=settings.deepseek_main_model
+        )
+
+        # 用聚合统计的 top 学院作为 sources（展示给用户）
+        top_colleges = aggregates.get("by_college", [])[: top_k if top_k else 5]
+        results = [
+            {
+                "text": f"{g['key']}：{g['count']} 人",
+                "title": g["key"],
+                "score": 1.0,
+                "retrieval_sources": ["mentor_aggregates"],
+            }
+            for g in top_colleges
+        ]
+        trace = {
+            "retrieved": [
+                {"doc_id": None, "score": 1.0, "retrieval_sources": ["mentor_aggregates"]}
+                for _ in results
+            ],
+            "wiki_used": False,
+            "wiki_stats": False,
+            "mentor_stats": True,
+            "mentor_aggregates": True,
+            "mentor_total": aggregates.get("total", 0),
+            "by_college_count": len(aggregates.get("by_college", [])),
+            "by_title_count": len(aggregates.get("by_title", [])),
+            "by_subject_count": len(aggregates.get("by_subject", [])),
+            "intent": intent,
+            "rewritten_query": rewritten_query,
+        }
+        logger.info(
+            f"统计查询完成(SQL 聚合): total={aggregates.get('total')}, "
+            f"colleges={len(aggregates.get('by_college', []))}, "
+            f"titles={len(aggregates.get('by_title', []))}, "
+            f"answer_len={len(answer)}"
+        )
+        return answer, results, trace
+
+    # 兜底1：拉全量 mentor 文本（伪统计，让 LLM 数数）
     mentor_stats = await _get_mentor_stats(db)
 
     if mentor_stats:
@@ -388,6 +446,55 @@ async def _get_mentor_stats(db: AsyncSession) -> list[dict]:
         })
 
     return out
+
+
+async def _get_mentor_aggregates(db: AsyncSession) -> dict:
+    """SQL 聚合查询导师统计数据（真统计，非 LLM 数数）
+
+    用 COUNT(DISTINCT mentor_id) 避免一个导师多个 identity 导致重复计数。
+    返回结构供 build_stats_aggregate_prompt 使用：
+        {
+            "total": int,
+            "by_college": [{"key": str, "count": int}, ...],
+            "by_title": [{"key": str, "count": int}, ...],
+            "by_subject": [{"key": str, "count": int}, ...],
+        }
+
+    如果 mentors 表为空则返回空 dict（调用方据此回退到 _get_mentor_stats）。
+
+    注意：title 字段是自由文本（如"教授/博导"可能写在一起），group_by(title)
+    会出现"教授"和"教授/博导"两个组，由 LLM 在润色时自行合并处理。
+    """
+    from app.models.mentor import Mentor, MentorIdentity
+
+    # 导师总数（去重，直接 COUNT mentors 表）
+    total_result = await db.execute(select(func.count(Mentor.id)))
+    total = total_result.scalar() or 0
+    if total == 0:
+        return {}
+
+    async def _group_count(field) -> list[dict]:
+        """按指定字段分组统计 DISTINCT mentor_id 数量，按数量降序"""
+        stmt = (
+            select(field, func.count(func.distinct(MentorIdentity.mentor_id)))
+            .where(field.isnot(None))
+            .where(field != "")
+            .group_by(field)
+            .order_by(func.count(func.distinct(MentorIdentity.mentor_id)).desc())
+        )
+        rows = (await db.execute(stmt)).all()
+        return [{"key": k, "count": int(c)} for k, c in rows if k]
+
+    by_college = await _group_count(MentorIdentity.college)
+    by_title = await _group_count(MentorIdentity.title)
+    by_subject = await _group_count(MentorIdentity.subject_direction)
+
+    return {
+        "total": int(total),
+        "by_college": by_college,
+        "by_title": by_title,
+        "by_subject": by_subject,
+    }
 
 
 @router.post("", response_model=ChatResponse)

@@ -185,3 +185,89 @@ def build_stats_prompt(
 4. 统计结果用清晰的列表或表格呈现
 
 回答："""
+
+
+def build_stats_aggregate_prompt(
+    question: str,
+    aggregates: dict,
+    history: Optional[list[dict]] = None,
+    intent: Optional[str] = None,
+) -> str:
+    """构造统计类 prompt（基于 SQL 聚合结果，让 LLM 润色而非数数）
+
+    与 build_stats_prompt 的区别：
+    - build_stats_prompt 把全量导师条目列表喂给 LLM 让它数数（伪统计，易幻觉）
+    - build_stats_aggregate_prompt 把已聚合好的统计数字喂给 LLM 让它润色输出（真统计）
+
+    aggregates 结构：
+        {
+            "total": int,                              # 导师总数（去重）
+            "by_college": [{"key": str, "count": int}, ...],  # 按学院分组
+            "by_title": [{"key": str, "count": int}, ...],    # 按职称分组
+            "by_subject": [{"key": str, "count": int}, ...],  # 按学科方向分组
+        }
+
+    Args:
+        question: 用户问题（已改写，无代词）
+        aggregates: SQL 聚合结果，结构如上
+        history: 历史消息
+        intent: 意图标签
+
+    Returns:
+        完整 prompt 字符串
+    """
+    # 历史对话块
+    history_block = ""
+    if history:
+        lines = []
+        for m in history[-8:]:
+            role_zh = "用户" if m.get("role") == "user" else "助手"
+            content = m.get("content", "")[:300]
+            lines.append(f"{role_zh}: {content}")
+        history_block = "\n".join(lines)
+
+    # 构建聚合统计块
+    total = aggregates.get("total", 0)
+
+    def _format_groups(groups: list[dict], label: str) -> str:
+        """格式化分组统计为文本块"""
+        if not groups:
+            return f"{label}：暂无数据"
+        parts = []
+        for g in groups:
+            key = g.get("key") or "（未填写）"
+            count = g.get("count", 0)
+            parts.append(f"  - {key}：{count} 人")
+        return f"{label}（共 {len(groups)} 项）：\n" + "\n".join(parts)
+
+    college_block = _format_groups(aggregates.get("by_college", []), "按学院分组")
+    title_block = _format_groups(aggregates.get("by_title", []), "按职称分组")
+    subject_block = _format_groups(aggregates.get("by_subject", []), "按学科方向分组")
+
+    intent_hint = f"（用户意图：{intent}）" if intent else ""
+
+    return f"""你是一个研究生院知识库助手。以下是知识库中导师数据的统计结果（已由数据库聚合计算完成，无需你再数数）。请基于这些统计结果回答用户的统计问题。
+
+历史对话：
+{history_block or "（无）"}
+
+导师统计结果（数据库聚合查询）：
+
+导师总数：{total} 人
+
+{college_block}
+
+{title_block}
+
+{subject_block}
+
+用户问题：{question} {intent_hint}
+
+要求：
+1. 严格基于以上统计结果回答，不要编造未列出的数字
+2. 数字已由数据库聚合计算，你只需组织语言呈现，不要重新数数
+3. 根据用户问题选择相关维度作答（如问"各学院导师数"则只列学院分组）
+4. 统计结果用清晰的列表或表格呈现
+5. 如果统计结果不足以回答某个维度（如某字段为空），如实说明
+
+回答："""
