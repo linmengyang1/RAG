@@ -53,6 +53,9 @@ frontend/tsconfig.tsbuildinfo
 backend/=*
 *~
 
+# RAGAS 评测结果（每次跑都生成，不入库；基线已存为 eval_baseline_*.md/csv）
+backend/tests/eval_results/
+
 # OS
 .DS_Store
 Thumbs.db

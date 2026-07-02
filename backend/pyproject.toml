@@ -47,10 +47,19 @@ gpu = [
     # 详见 backend/app/services/retrieval/reranker.py
     "transformers>=4.57,<5",
 ]
-# 评测依赖（P6 用）
+# 评测依赖（RAGAS 评测用，tests/eval_ragas.py）
+# 锁定 ragas 0.4.x：用 LangchainLLMWrapper/LangchainEmbeddingsWrapper API
+# 注意：ragas 0.2-0.4 都硬依赖 langchain_community.chat_models.vertexai，
+# 该路径在 langchain-community 0.4+ 已移除（迁到 langchain-google-vertexai），
+# 故必须锁定 langchain-community<0.4，否则 import ragas 报 ModuleNotFoundError
+# langchain-openai: 用 DeepSeek 作为 RAGAS 评估 LLM（兼容 OpenAI 接口）
+# langchain-huggingface: 用本地 BGE-M3 作为 RAGAS 评估 embeddings
 eval = [
-    "ragas>=0.1.0",
+    "ragas>=0.4,<0.5",
+    "langchain-community>=0.3,<0.4",
     "datasets>=2.0.0",
+    "langchain-openai>=0.1.0",
+    "langchain-huggingface>=0.1.0",
 ]
 dev = [
     "pytest>=8.0.0",
