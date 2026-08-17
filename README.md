@@ -328,7 +328,26 @@ cd frontend && npm install && npm run dev
 
 全量 md 文件已摄入完成（732 文档 / 3271 chunks）。所有文件由 MinerU 预先解析为 md 格式，存放在 `output/files_md/`，scanner 只扫描 `.md` 文件，不再调用 MinerU API。
 
-另有 1 份新增的 `导师信息汇总.md`（294 位导师统计汇总）待摄入，用于 RAGAS 评测时统计查询走 RAG 检索。
+另有 1 份 `导师信息汇总.md`（294 位导师统计汇总，document id=297，37 chunks，已摄入）用于 RAGAS 评测时统计查询走 RAG 检索（STATS_USE_RAG=true）。
+
+### RAGAS 评测数据集（v2，2026-08-17 重建）
+
+`backend/tests/eval_dataset.json` 已重建为 50 条**全部可答**的评测问题。旧版 50 条存在大量"答案不在 chunks 中"的问题（指向不存在的"学位工作"分类，以及学籍管理/学位授予细则/论文查重/开题报告/中期考核/实验室安全等无对应文档的主题），导致 faithfulness 虚高、context_precision/recall/answer_relevancy 偏低。
+
+v2 每条问题的 ground_truth 均从 `output/files_md/` 真实 md 提取并核对，覆盖 8 类意图：
+
+| 意图 | 条数 | 数据来源（真实 md） |
+|------|------|---------------------|
+| 导师查询 | 9 | 导师信息/（段晓东等采集表） |
+| 统计查询 | 4 | 导师信息/ 各学院导师清单 |
+| 政策咨询 | 6 | 研工工作/违纪处分办法 + 研究生文件/奖助体系实施办法 |
+| 流程办理 | 7 | 招生工作/复试方案 + 研究生文件/三助一辅 + 培养工作/评教通知 |
+| 招生信息 | 8 | 招生工作/招生章程 + 复试方案 |
+| 学位管理 | 5 | 培养工作/答辩公告 + 违纪处分（学术不端条款） |
+| 奖学金 | 7 | 研究生文件/奖助体系实施办法 |
+| 其他 | 4 | 培养工作/课程安排表 + 评教通知 |
+
+重跑基线前需确保：导师信息/招生章程/复试方案/奖助体系实施办法/违纪处分办法/答辩公告/课程安排表 均已摄入 Milvus。
 
 | 表 | 数量 | 说明 |
 |----|------|------|
@@ -440,12 +459,13 @@ graduate-rag/
   - [x] Reranker max_length=512→256 优化（19s→11.5s，已 RAGAS 验证不降召回）
   - [x] 鉴权 UI（前端 login/register 页面 + authFetch 自动注入 Bearer token + 401 跳登录）
   - [x] RAGAS 评测脚本适配 AUTH_DISABLED=false（自动登录 admin + BGE-M3 CPU 模式避免显存争抢）
+  - [x] RAGAS 评测数据集 v2 重建（50 条全部可答，ground_truth 取自真实 md，剔除旧版无对应文档的"学位工作"等问题）
   - [x] langgraph 依赖移除（声明未用，精简依赖）
   - [x] Dockerfile torch 改走清华镜像（避免绕开镜像直连 pytorch.org）
   - [x] PG chunks 表补 page_num/char_start/char_end 字段（原文位置定位）
   - [ ] Wiki 全量重新生成（旧数据因容器重启丢失，数据层任务非代码）
   - [ ] Mentors 重建（依赖 wiki_entries，数据层任务非代码）
-  - [ ] RAGAS 重测基线（chunker v2 后检索效果可能变化，需运行评测脚本）
+  - [ ] RAGAS 重测基线（数据集 v2 已就绪，待摄入导师汇总后运行 eval_ragas.py 建立 v6 基线）
 
 > 项目完善计划详见 [.trae/documents/project-completion-plan.md](../.trae/documents/project-completion-plan.md)。当前数据摄入 732/732 md 文档（全量完成），wiki 待重新生成。
 
