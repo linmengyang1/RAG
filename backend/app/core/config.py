@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     embed_lazy_load: bool = True
     reranker_lazy_load: bool = True
 
+    # ───── RAG 检索策略 ─────
+    # 为 True 时，统计类查询（如"各学院导师数量"）走 hybrid_search 检索 chunks
+    # 而非 SQL 聚合 mentors 表。用于 RAGAS 评测等场景，让统计答案也经过完整 RAG 管线
+    stats_use_rag: bool = False
+
     # ───── JWT ─────
     jwt_secret: str = "change-me-to-a-long-random-string"
     jwt_alg: str = "HS256"

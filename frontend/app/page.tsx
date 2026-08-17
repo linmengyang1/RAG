@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import SearchPanel from "@/components/SearchPanel";
 import ChatPanel from "@/components/ChatPanel";
 import WikiPanel from "@/components/WikiPanel";
+import { useAuth } from "@/lib/auth-context";
 
 type Tab = "chat" | "search" | "wiki";
 
@@ -32,9 +33,26 @@ const TABS: { id: Tab; label: string; icon: string; desc: string }[] = [
 
 function HomeContent() {
   const router = useRouter();
+  const { user, loading, logout } = useAuth();
   const searchParams = useSearchParams();
   const initialTab = (searchParams.get("tab") as Tab) || "chat";
   const [tab, setTab] = useState<Tab>(initialTab);
+
+  // 路由守卫：未登录跳 /login
+  useEffect(() => {
+    if (!loading && !user) {
+      router.replace("/login");
+    }
+  }, [loading, user, router]);
+
+  // 加载中或未登录时显示加载态（避免未登录内容闪烁）
+  if (loading || !user) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-slate-500 text-sm">加载中...</div>
+      </div>
+    );
+  }
 
   // 切换 tab 时同步到 URL
   function handleTabChange(tabId: Tab) {
@@ -74,11 +92,26 @@ function HomeContent() {
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2 text-xs text-slate-400">
-              <span className="hidden sm:inline">API:</span>
-              <code className="px-2 py-0.5 bg-slate-100 rounded font-mono text-slate-600">
-                localhost:18000
-              </code>
+            <div className="flex items-center gap-3">
+              {/* 用户信息 */}
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-slate-700">{user.username}</span>
+                {user.role === "admin" && (
+                  <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs rounded">
+                    管理员
+                  </span>
+                )}
+              </div>
+              {/* 登出 */}
+              <button
+                onClick={() => {
+                  logout();
+                  router.push("/login");
+                }}
+                className="text-sm text-slate-500 hover:text-red-600 transition-colors"
+              >
+                登出
+              </button>
             </div>
           </div>
         </div>

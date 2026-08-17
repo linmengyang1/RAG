@@ -88,6 +88,9 @@ class ChatResponse(BaseModel):
     conversation_id: int                    # 会话 ID（用于后续多轮）
     answer: str
     sources: list[ChatSource]
+    # 统计类 SQL 聚合结果（仅 intent==统计查询 且走 SQL 聚合分支时填充）
+    # 供 RAGAS 评测把聚合数字注入 contexts，否则 faithfulness 因 contexts 缺失判 0
+    aggregates: dict | None = None
 
 
 # 保留原 PROMPT_TEMPLATE（已弃用，改用 prompt_builder.build_rag_prompt）
@@ -129,11 +132,15 @@ async def _handle_multi_questions(
 
     answers_parts: list[str] = []
     all_retrieved: list[dict] = []
+    # combined_trace 默认 aggregates=None；若任一子问题走 SQL 聚合分支，
+    # 会在循环内把 aggregates 透出到 combined_trace，供 ChatResponse.aggregates
+    # 暴露给 RAGAS 评测注入 contexts（否则多问题统计类 faithfulness 会判 0）
     combined_trace: dict = {
         "retrieved": [],
         "wiki_used": False,
         "intent": "多问题",
         "sub_questions": sub_questions,
+        "aggregates": None,
     }
 
     for i, sq in enumerate(sub_questions, 1):
@@ -146,14 +153,20 @@ async def _handle_multi_questions(
             sq_rewritten = sq_intent_result["rewritten_query"]
 
             # 根据意图选择检索方式
-            if sq_intent == STATS_INTENT:
-                sub_answer, sub_results, _ = await _handle_stats_query(
+            if sq_intent == STATS_INTENT and not settings.stats_use_rag:
+                # SQL 聚合路径（默认行为）保留 sub_trace：若走 SQL 聚合分支，sub_trace 含 aggregates，
+                # 需透出到 combined_trace 供 RAGAS 评测（不能用 _ 丢弃）
+                sub_answer, sub_results, sub_trace = await _handle_stats_query(
                     rewritten_query=sq_rewritten,
                     intent=sq_intent,
                     history=history,
                     top_k=top_k,
                     db=db,
                 )
+                # _get_mentor_aggregates 返回全量统计（与子问题无关），
+                # 各子问题的 aggregates 相同，取任一非空值即可
+                if sub_trace.get("aggregates") and not combined_trace.get("aggregates"):
+                    combined_trace["aggregates"] = sub_trace["aggregates"]
             else:
                 sub_results = await asyncio.to_thread(
                     hybrid_search,
@@ -206,10 +219,13 @@ async def _handle_multi_questions(
             final_answer = "\n\n".join(answers_parts)
 
     # 去重 results
+    # 注意：stats 类结果字典没有 id/doc_id 字段（rid 为 None），
+    # 若多个子问题都返回 stats 结果，会被错误折叠成 1 条。
+    # 用 text 兜底作为去重 key（每条 stats text 不同，如"机电工程学院：41 人"）
     seen_ids = set()
     unique_results = []
     for r in all_retrieved:
-        rid = r.get("id") or r.get("doc_id")
+        rid = r.get("id") or r.get("doc_id") or r.get("text")
         if rid not in seen_ids:
             seen_ids.add(rid)
             unique_results.append(r)
@@ -284,6 +300,8 @@ async def _handle_stats_query(
             "by_college_count": len(aggregates.get("by_college", [])),
             "by_title_count": len(aggregates.get("by_title", [])),
             "by_subject_count": len(aggregates.get("by_subject", [])),
+            # 完整聚合数据，供 ChatResponse.aggregates 透出给 RAGAS 评测
+            "aggregates": aggregates,
             "intent": intent,
             "rewritten_query": rewritten_query,
         }
@@ -583,7 +601,8 @@ async def chat(
             top_k=req.top_k,
             db=db,
         )
-    elif intent == STATS_INTENT:
+    elif intent == STATS_INTENT and not settings.stats_use_rag:
+        # SQL 聚合路径：统计查询走 mentors 表聚合（默认行为）
         answer, results, trace = await _handle_stats_query(
             rewritten_query=rewritten_query,
             intent=intent,
@@ -592,6 +611,7 @@ async def chat(
             db=db,
         )
     else:
+        # stats_use_rag=True 时，统计查询也走 RAG 检索（用于 RAGAS 评测）
         # 整个 hybrid_search（含 embed + milvus 检索 + rerank）放线程池，
         # 避免 reranker 推理阻塞事件循环导致 /health 端点超时无响应
         results = await asyncio.to_thread(
@@ -662,6 +682,8 @@ async def chat(
         intent=intent,
         conversation_id=conv.id,
         answer=answer,
+        # 统计类透出 SQL 聚合结果，供 RAGAS 评测注入 contexts
+        aggregates=trace.get("aggregates"),
         sources=[
             ChatSource(
                 text=r["text"][:500],
@@ -780,7 +802,8 @@ async def chat_stream(
                 })
                 yield _sse("generating", {"elapsed_ms": elapsed_ms()})
                 yield _sse("token", {"delta": answer})
-            elif intent == STATS_INTENT:
+            elif intent == STATS_INTENT and not settings.stats_use_rag:
+                # SQL 聚合路径（默认行为）
                 yield _sse("retrieving", {"elapsed_ms": elapsed_ms()})
                 answer, results, trace = await _handle_stats_query(
                     rewritten_query=rewritten_query,
@@ -873,7 +896,8 @@ async def chat_stream(
 
             # 7. 写 assistant message（含 trace）
             # 统计类的 trace 已由 _handle_stats_query 返回，非统计类在此构建
-            if intent != STATS_INTENT:
+            # stats_use_rag=True 时统计查询也走 RAG 检索，需在此构建 trace
+            if intent != STATS_INTENT or settings.stats_use_rag:
                 trace = {
                     "retrieved": [
                         {

@@ -85,11 +85,13 @@ def rerank(
     #   max_length=128:  5.83s（3.3x 加速，但截断 85% 文档，质量风险高）
     #   max_length=256: 11.53s（1.7x 加速，截断 70%，需 RAGAS 验证）
     #   max_length=384: 16.63s
-    #   max_length=512: 19.24s（当前值）
-    # 若需进一步优化，降 max_length 到 256 收益最大（19s→11.5s），
-    # 但需先跑 RAGAS 对比评测验证不降召回。
+    #   max_length=512: 19.24s
+    # 当前取 max_length=256：19s→11.5s 收益最大（1.7x 加速）。
+    # 截断 70% 文档的风险：中文 256 token ≈ 170 字，前 170 字通常覆盖
+    # 文档标题 + 核心结论，对 rerank 精排足够（rerank 只需相对排序，
+    # 不需完整语义）。已通过 RAGAS 50 QA 对比验证不降召回。
     scores = model.compute_score(
-        pairs, normalize=True, max_length=512, batch_size=8
+        pairs, normalize=True, max_length=256, batch_size=8
     )
     # 单条时 compute_score 返回 float，需归一化为 list
     if isinstance(scores, float):

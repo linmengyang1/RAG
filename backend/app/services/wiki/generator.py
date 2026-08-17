@@ -295,6 +295,8 @@ async def generate_wiki_entries(
             )
             ids = result.get("ids", []) if isinstance(result, dict) else []
             logger.info(f"wiki Milvus 写入: {len(ids)} 条, ids 示例={ids[:3]}")
+            # flush 确保数据落盘可查（避免 get_collection_stats 返回 0 的问题）
+            milvus_client.flush(settings.milvus_collection_wiki)
 
     stats = {"generated": generated, "skipped": skipped, "errors": errors}
     logger.info(f"wiki 生成完成: {stats}")

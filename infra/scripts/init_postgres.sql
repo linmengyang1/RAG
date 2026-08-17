@@ -92,6 +92,23 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_mentor ON chunks(mentor_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_milvus ON chunks(milvus_id);
 
+-- chunks 增加 page_num/char_start/char_end 字段（幂等，用于原文位置定位）
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='chunks' AND column_name='page_num') THEN
+    ALTER TABLE chunks ADD COLUMN page_num INT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='chunks' AND column_name='char_start') THEN
+    ALTER TABLE chunks ADD COLUMN char_start BIGINT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name='chunks' AND column_name='char_end') THEN
+    ALTER TABLE chunks ADD COLUMN char_end BIGINT;
+  END IF;
+END $$;
+
 -- ───── Wiki 条目 ─────
 CREATE TABLE IF NOT EXISTS wiki_entries (
     id             BIGSERIAL PRIMARY KEY,

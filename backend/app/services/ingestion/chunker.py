@@ -1,21 +1,23 @@
-"""文本切片器：把长文本切成 ~500 字符的 chunk
+"""文本切片器：按 markdown 标题 + 段落累积切分
 
 策略：
-    1. 优先按段落（\\n\\n）切
-    2. 累积段落直到接近 CHUNK_SIZE 字符
-    3. 超长段落按 CHUNK_SIZE 硬切
+    1. 优先按 markdown 标题（## 或 ###）切分成 section
+    2. 每个 section 内按段落（\\n\\n）累积到 CHUNK_SIZE
+    3. 超长 section 按 CHUNK_SIZE 硬切
     4. 相邻 chunk 有 CHUNK_OVERLAP 字符重叠
 
-中文约 3 字符 ≈ 1 token，CHUNK_SIZE=500 字符 ≈ 167 token。
+中文约 3 字符 ≈ 1 token，CHUNK_SIZE=1500 字符 ≈ 500 token。
+BGE-M3 最大支持 8192 token，1500 字符远在安全范围内。
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 # 切片参数
-CHUNK_SIZE = 500         # 每块最大字符数（约 167 token）
-CHUNK_OVERLAP = 200      # 相邻块重叠字符数（占 chunk 的 40%，保证跨块语义连续）
+CHUNK_SIZE = 1500        # 每块最大字符数（约 500 token）
+CHUNK_OVERLAP = 300     # 相邻块重叠字符数（占 chunk 的 20%，保证跨块语义连续）
 
 
 @dataclass
@@ -38,6 +40,38 @@ def _estimate_tokens(text: str) -> int:
 def _hard_split(text: str, size: int) -> List[str]:
     """把超长文本硬切成 size 大小的块"""
     return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+def _split_by_markdown_headers(text: str) -> list[tuple[int, int, str]]:
+    """按 markdown 标题（## 或 ###）切分成 section
+
+    返回 [(start, end, section_text), ...]，start/end 是在原文中的字符位置。
+    标题行本身包含在 section_text 中。
+    如果没有标题，返回整段文本作为一个 section。
+    """
+    # 匹配 ## 或 ### 开头的行（不匹配 # 一级标题，因为通常只有一个）
+    header_pattern = re.compile(r'^#{2,3}\s+', re.MULTILINE)
+
+    matches = list(header_pattern.finditer(text))
+    if not matches:
+        # 没有标题结构，整体作为一个 section
+        return [(0, len(text), text)] if text.strip() else []
+
+    sections: list[tuple[int, int, str]] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        section_text = text[start:end].strip()
+        if section_text:
+            sections.append((start, start + len(text[start:end].rstrip()), section_text))
+
+    # 如果第一个标题之前有内容（如 # 标题行），也作为一个 section
+    if matches[0].start() > 0:
+        pre_text = text[:matches[0].start()].strip()
+        if pre_text:
+            sections.insert(0, (0, matches[0].start(), pre_text))
+
+    return sections
 
 
 def _find_page_num(char_pos: int, page_map: Optional[List[Tuple[int, int, int]]]) -> Optional[int]:
@@ -67,6 +101,8 @@ def chunk_text(
 ) -> List[TextChunk]:
     """把长文本切成 chunk 列表
 
+    切分优先级：markdown 标题（##/###）> 段落（\\n\\n）> 硬切
+
     Args:
         text: 原始正文
         page_map: 可选页码映射 [(page_num, page_char_start, page_char_end), ...]
@@ -79,73 +115,87 @@ def chunk_text(
     if not text:
         return []
 
-    # 按段落分割并记录每个段落在原文中的 (start, end) 位置
-    paragraphs: list[tuple[int, int, str]] = []  # [(start, end, text)]
-    cursor = 0
-    for raw in text.split("\n\n"):
-        if not raw.strip():
-            cursor += len(raw) + 2  # +2 是 \n\n
-            continue
-        p = raw.strip()
-        # 查找段落 p 在 text 中的位置（从 cursor 开始）
-        start = text.find(p, cursor)
-        if start == -1:
-            start = cursor  # 兜底
-        end = start + len(p)
-        paragraphs.append((start, end, p))
-        cursor = end
-
-    if not paragraphs:
+    # 第一步：按 markdown 标题切分成 section
+    sections = _split_by_markdown_headers(text)
+    if not sections:
         return []
 
-    # 累积段落成 chunk，跟踪 (char_start, char_end)
-    chunks: list[tuple[int, int, str]] = []  # [(start, end, text)]
-    cur_start: Optional[int] = None
-    cur_end: int = 0
-    cur_text: str = ""
+    # 第二步：每个 section 内按段落累积成 chunk
+    raw_chunks: list[tuple[int, int, str]] = []  # [(start, end, text)]
 
-    for start, end, p in paragraphs:
-        # 段落本身超长：先把当前累积的存入，再硬切段落
-        if len(p) > CHUNK_SIZE:
-            if cur_text:
-                chunks.append((cur_start, cur_end, cur_text))
-                cur_text = ""
-                cur_start = None
-            # 硬切超长段落，每段记录对应位置
-            for i in range(0, len(p), CHUNK_SIZE):
-                piece = p[i:i + CHUNK_SIZE]
-                chunks.append((start + i, start + i + len(piece), piece))
+    for sec_start, sec_end, sec_text in sections:
+        # section 本身不超 CHUNK_SIZE：直接作为一个 chunk
+        if len(sec_text) <= CHUNK_SIZE:
+            raw_chunks.append((sec_start, sec_start + len(sec_text), sec_text))
             continue
 
-        # 累积到 CHUNK_SIZE
-        if cur_text and len(cur_text) + len(p) + 2 > CHUNK_SIZE:  # +2 是 \n\n
-            chunks.append((cur_start, cur_end, cur_text))
-            cur_text = p
-            cur_start, cur_end = start, end
-        else:
-            if cur_text:
-                cur_text = f"{cur_text}\n\n{p}"
-                cur_end = end
-            else:
+        # section 超长：按段落累积切分
+        paragraphs: list[tuple[int, int, str]] = []
+        cursor = 0
+        for raw in sec_text.split("\n\n"):
+            if not raw.strip():
+                cursor += len(raw) + 2
+                continue
+            p = raw.strip()
+            start = sec_text.find(p, cursor)
+            if start == -1:
+                start = cursor
+            end = start + len(p)
+            paragraphs.append((start, end, p))
+            cursor = end
+
+        if not paragraphs:
+            continue
+
+        cur_start: Optional[int] = None
+        cur_end: int = 0
+        cur_text: str = ""
+
+        for start, end, p in paragraphs:
+            # 段落本身超长：硬切
+            if len(p) > CHUNK_SIZE:
+                if cur_text:
+                    raw_chunks.append((sec_start + cur_start, sec_start + cur_end, cur_text))
+                    cur_text = ""
+                    cur_start = None
+                for i in range(0, len(p), CHUNK_SIZE):
+                    piece = p[i:i + CHUNK_SIZE]
+                    raw_chunks.append((sec_start + start + i, sec_start + start + i + len(piece), piece))
+                continue
+
+            # 累积到 CHUNK_SIZE
+            if cur_text and len(cur_text) + len(p) + 2 > CHUNK_SIZE:
+                raw_chunks.append((sec_start + cur_start, sec_start + cur_end, cur_text))
                 cur_text = p
                 cur_start, cur_end = start, end
+            else:
+                if cur_text:
+                    cur_text = f"{cur_text}\n\n{p}"
+                    cur_end = end
+                else:
+                    cur_text = p
+                    cur_start, cur_end = start, end
 
-    if cur_text:
-        chunks.append((cur_start, cur_end, cur_text))
+        if cur_text:
+            raw_chunks.append((sec_start + cur_start, sec_start + cur_end, cur_text))
 
-    # 加 overlap：每个 chunk 前面拼上一个 chunk 的尾部
+    if not raw_chunks:
+        return []
+
+    chunks = raw_chunks
+
+    # 第三步：加 overlap（相邻 chunk 尾部拼接）
     if len(chunks) > 1 and CHUNK_OVERLAP > 0:
         overlapped: list[tuple[int, int, str]] = [chunks[0]]
         for i in range(1, len(chunks)):
             prev_start, prev_end, prev_text = chunks[i - 1]
             cur_start, cur_end, cur_text = chunks[i]
             prev_tail = prev_text[-CHUNK_OVERLAP:]
-            # overlap 部分：char_start 回退 overlap 字符（不小于 0）
             new_start = max(0, cur_start - CHUNK_OVERLAP)
             overlapped.append((new_start, cur_end, f"{prev_tail}\n\n{cur_text}"))
         chunks = overlapped
 
-    # 包装成 TextChunk，查 page_num
+    # 包装成 TextChunk
     result = [
         TextChunk(
             index=i,

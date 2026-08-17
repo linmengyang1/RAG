@@ -1,3 +1,4 @@
+
 # Graduate RAG
 
 研究生院知识库 RAG 系统 — 基于 DeepSeek API + MinerU API + Milvus 2.4 + 本地 BGE-M3 Embedding。
@@ -12,7 +13,7 @@
 | Embedding | BGE-M3（本地，GTX 1660 SUPER 6GB，1024 维 Dense + Sparse） |
 | Reranker | bge-reranker-v2-m3（本地，已启用） |
 | 元数据 | PostgreSQL 16 |
-| Agent | LangGraph（P3 阶段，Wiki 优先 → RAG → 沉淀） |
+| 鉴权 | JWT（HS256）+ 前端 authFetch 自动注入 Bearer |
 | 后端 | FastAPI + SQLAlchemy async |
 | 前端 | Next.js 14 + Tailwind CSS（已实现） |
 
@@ -32,10 +33,18 @@
 
 ### 前置条件
 
-1. Windows 11 + WSL2（Ubuntu 24.04）
-2. Docker Engine（装在 WSL2 内）
+1. Windows 11 + WSL2（Ubuntu 24.04，启用 systemd）
+2. Docker Engine（装在 WSL2 内，`systemctl enable docker` 设为开机自启）
 3. NVIDIA 显卡 + nvidia-container-toolkit（GPU 模式，见下方 [GPU 配置说明](#gpu-配置说明)）
 4. `../output/` 目录有数据（markdown + files）
+5. **`.wslconfig` 配置**（位于 `C:\Users\<用户名>\.wslconfig`，防止 WSL2 空闲回收导致容器反复重启）：
+   ```ini
+   [wsl2]
+   vmIdleTimeout=86400000
+   memory=8GB
+   ```
+   - `vmIdleTimeout=86400000`：24 小时不自动关闭 VM（默认会很短，导致 docker daemon 跟着重启）
+   - `memory=8GB`：限制 WSL2 最大内存（机器总 15.72GB，留一半给 Windows）
 
 ### 首次启动
 
@@ -57,6 +66,42 @@ curl http://localhost:18000/health
 # 预期: {"status":"ok","postgres":"ok","milvus":"ok",...}
 ```
 
+### 日常启动（手动启动）
+
+首次构建镜像后，后续每次启动只需以下步骤（在 WSL2 终端内、项目根目录执行）：
+
+```bash
+cd /mnt/c/Users/lmy/Desktop/test/graduate-rag
+
+# 1. 确认 Docker daemon 在运行（若 WSL 刚启动，docker 会自动起）
+docker info > /dev/null 2>&1 && echo "docker OK" || sudo systemctl start docker
+
+# 2. 启动所有服务（后台，数据已持久化，无需重新摄入）
+docker compose --env-file .env up -d
+
+# 3. 等待后端就绪（加载 BGE-M3 模型约需 60-90 秒）
+until curl -s http://localhost:18000/health | grep -q '"status":"ok"'; do
+  echo "等待 backend..."; sleep 5
+done
+echo "backend 就绪"
+
+# 4. 验证所有服务
+docker compose ps
+curl -s http://localhost:18000/health
+# 预期: {"status":"ok","postgres":"ok","milvus":"ok",...}
+```
+
+**在 Windows 浏览器访问**：http://localhost:3000 （首次打开页面有数秒编译延迟，属正常）
+
+**停止服务**：
+
+```bash
+docker compose down        # 停止容器（保留数据）
+docker compose down -v     # 停止并删除数据卷（慎用，会清空 Milvus/PG 数据）
+```
+
+> 说明：容器配了 `restart: unless-stopped`，WSL2 运行期间即使 Docker daemon 偶发重启，容器也会自动恢复，只需等 60-90 秒重新加载模型后即可访问。
+
 ### 访问入口
 
 - **前端 Web UI：http://localhost:3000** （检索/问答/Wiki 三 Tab）
@@ -64,6 +109,15 @@ curl http://localhost:18000/health
 - 后端健康检查：http://localhost:18000/health
 - MinIO 控制台：http://localhost:19001 （minioadmin / minioadmin）
 - PostgreSQL（本机调试）：`psql -h localhost -p 15432 -U grad -d grad_rag`
+
+### 登录凭据
+
+当前 `.env` 中 `AUTH_DISABLED=false`（鉴权已开启），访问前端需登录：
+
+- 用户名：`admin`
+- 密码：`admin123`
+
+如需关闭鉴权（仅本地内网测试），在 `.env` 中设置 `AUTH_DISABLED=true` 后重启 backend 容器。
 
 ## JWT_SECRET 是什么
 
@@ -151,7 +205,7 @@ make ingest-all
 docker compose exec backend python -m app.cli.ingest --limit-md 100 --limit-pdf 20
 ```
 
-摄入流程：扫描 → 解析（md 直读 / pdf 走 MinerU）→ 切片 → BGE-M3 向量化 → 写入 Milvus + PG。
+摄入流程：扫描 `files_md/`（只收 `.md` 文件）→ 解析 md 元数据 → 切片（1500 字符 + markdown 标题切分）→ BGE-M3 向量化 → 写入 Milvus + PG。不再调用 MinerU API。
 
 ### 2. 检索
 
@@ -188,18 +242,20 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ## 增强功能
 
-### 1. Chunk 切片（500/200 重叠）
+### 1. Chunk 切片（1500 字符 + markdown 标题切分）
 
-- **chunk_size=500**：每个切片约 500 字符（按段落累积，超长硬切）
-- **overlap=200**：相邻切片有 200 字符重叠，避免语义断裂
+- **chunk_size=1500**：每个切片约 1500 字符（约 500 token），按 markdown `##`/`###` 标题优先切分
+- **overlap=300**：相邻切片有 300 字符重叠（20%），避免语义断裂
+- **标题优先**：先按 `##`/`###` 标题切分成 section，section 内按段落累积到 1500 字符
 - **位置跟踪**：每个 chunk 记录 `char_start/char_end`（原文字符位置）+ `page_num`（PDF 页码，md 为 None）
+- 详见 [docs/chunk-strategy.md](docs/chunk-strategy.md)
 
 ### 2. 双路检索 + RRF + Rerank
 
 - **Dense 路**：BGE-M3 1024 维向量，HNSW + COSINE
 - **Sparse 路**：BGE-M3 sparse 向量，SPARSE_INVERTED_INDEX + IP（等同 BM25）
 - **RRF 融合**：Reciprocal Rank Fusion（k=60），公式 `score(d) = sum(1/(k+rank+1))`
-- **召回 K=30**：`search_limit = max(top_k * 6, 30)`，保证 rerank 前候选集 ≥ 30
+- **召回 K**：`search_limit = min(max(top_k * 2, 30), 50)`，默认 top_k=5 时每路召回 30 条候选
 - **Rerank**：bge-reranker-v2-m3 对候选集精排，输出 sigmoid 归一化分数，截断到 top_k
 - **来源标注**：每条结果含 `retrieval_sources`（如 `["dense","sparse"]`），前端用三色标签展示
 
@@ -264,18 +320,22 @@ cd frontend && npm install && npm run dev
 
 ### 鉴权说明
 
-当前 `.env` 中 `AUTH_DISABLED=true`（测试期间免登录）。生产部署前改为 `false`，前端需在请求头加 `Authorization: Bearer <token>`。
+当前 `.env` 中 `AUTH_DISABLED=false`（鉴权已开启）。前端通过 `lib/auth.ts` + `lib/auth-context.tsx` 管理 token，所有请求经 `api.ts` 的 `authFetch` 自动注入 `Authorization: Bearer <token>`，401 自动清除 token 并跳转 `/login`。登录/注册页面在 `app/login/` 和 `app/register/`。
+
+如需临时关闭鉴权（仅本地内网测试），在 `.env` 中设置 `AUTH_DISABLED=true` 后重启 backend 容器，此时 `authFetch` 不注入 token 也能正常访问。
 
 ## 数据摄入状态
 
-全量数据已摄入完成。
+全量 md 文件已摄入完成（732 文档 / 3271 chunks）。所有文件由 MinerU 预先解析为 md 格式，存放在 `output/files_md/`，scanner 只扫描 `.md` 文件，不再调用 MinerU API。
+
+另有 1 份新增的 `导师信息汇总.md`（294 位导师统计汇总）待摄入，用于 RAGAS 评测时统计查询走 RAG 检索。
 
 | 表 | 数量 | 说明 |
 |----|------|------|
-| documents | **810** | 全量摄入完成，全部 status=embedded |
-| chunks | **5699** | 全量向量化完成，已入 Milvus |
-| wiki_entries | **1072** | 全量生成完成，person/policy/process 三类 |
-| mentors | **793** | 从 wiki person 反推构建，chunks.mentor_id 关联率 98.1% |
+| documents | **732** | 全量 md 摄入完成，全部 status=embedded（+1 待摄入） |
+| chunks | **3271** | 全量向量化完成，已入 Milvus |
+| wiki_entries | **0** | 待重新生成（旧 wiki 因容器重启丢失，需重跑 gen_wiki） |
+| mentors | **0** | 待重新构建（依赖 wiki_entries） |
 | conversations | 3 | 会话历史（测试数据） |
 | messages | 84 | 对话消息 |
 
@@ -283,23 +343,39 @@ cd frontend && npm install && npm run dev
 
 | 分类 | 文档数 | 占比 |
 |------|--------|------|
-| 导师信息 | 380 | 46.9% |
-| 培养工作 | 209 | 25.8% |
-| 招生工作 | 119 | 14.7% |
-| 研工工作 | 95 | 11.7% |
-| 学位工作 | 0 | 0% |
-| 其他 | 17 | 2.1% |
+| 导师信息 | 295 | 40.3% |
+| 培养工作 | 208 | 28.4% |
+| 招生工作 | 119 | 16.3% |
+| 研工工作 | 103 | 14.1% |
+| 研究生文件 | 7 | 1.0% |
+| **总计** | **732** | 100% |
+
+### chunk 切分参数
+
+| 参数 | 值 | 说明 |
+|------|------|------|
+| CHUNK_SIZE | 1500 字符 | 约 500 token，BGE-M3 最大 8192 token |
+| CHUNK_OVERLAP | 300 字符 | 20% 重叠 |
+| 切分策略 | markdown 标题优先 | 按 `##`/`###` 切 section，section 内段落累积 |
+
+详见 [docs/chunk-strategy.md](docs/chunk-strategy.md)。
 
 ### 重新摄入
 
 ```bash
-# 全量重跑（跳过已摄入，幂等）
-docker compose exec backend python -m app.cli.ingest
+# 1. 重建 Milvus 集合（drop + recreate）
+docker exec grad-rag-backend python /app/infra/scripts/init_milvus.py --force
 
-# 强制清空重跑
-make init-milvus-force
-docker compose exec postgres psql -U grad -d grad_rag -c "DELETE FROM chunks; DELETE FROM documents;"
-make ingest-all
+# 2. 清空 PG 数据
+docker exec grad-rag-postgres psql -U grad -d grad_rag -c \
+  "TRUNCATE chunks RESTART IDENTITY CASCADE; TRUNCATE documents RESTART IDENTITY CASCADE; TRUNCATE wiki_entries RESTART IDENTITY CASCADE;"
+
+# 3. 全量摄入（纯 md 解析，不调 MinerU，约 10 分钟）
+docker exec -d grad-rag-backend bash -c \
+  'cd /app/backend && nohup python -m app.cli.ingest > /tmp/ingest.log 2>&1'
+
+# 4. 查看进度
+docker exec grad-rag-backend bash -c 'tail -n 10 /tmp/ingest.log'
 ```
 
 ## 目录结构
@@ -323,10 +399,10 @@ graduate-rag/
 │       │   ├── ingestion/  # scanner / markdown_parser / chunker / embedder / milvus_writer / pipeline / mineru_client
 │       │   ├── retrieval/  # hybrid_search（dense + sparse RRF 融合 + rerank）
 │       │   ├── llm/        # DeepSeek API + 意图识别 + prompt 构建（含长度控制）
-│       │   ├── wiki/       # 知识沉淀（生成 + 检索）
+│       │   ├── wiki/       # 知识沉淀（生成 + 检索 + 链接构建）
 │       │   ├── mentor/     # 导师实体构建（从 wiki 反推 + chunks 关联）
-│       │   └── agent/      # LangGraph（P3）
-│       └── cli/            # CLI 入口（ingest.py）
+│       │   └── schemas/    # Pydantic 请求/响应模型
+│       └── cli/            # CLI 入口（ingest / build_mentors / cache_md / verify_doc_xls）
 └── infra/
     └── scripts/
         ├── init_milvus.py
@@ -335,27 +411,43 @@ graduate-rag/
 
 ## 数据集
 
-数据位于 `../output/`（与项目并列），通过 docker-compose 只读挂载到容器 `/data/output`：
+数据位于 `../output/`（与项目并列），通过 docker-compose 挂载到容器 `/data/output`：
 
-- `markdown/` — 已抓取的网页正文（导师信息 380 / 培养工作 209 / 招生工作 119 / 研工工作 95）
-- `files/` — 附件 PDF/DOCX（与 markdown 互补，独立摄入）
-- 全量 810 文档已经过 MinerU 解析 → BGE-M3 向量化 → 写入 Milvus + PG
+- `files_md/` — MinerU 预解析的 Markdown 文件（732 个，scanner 只扫描此目录）
+  - `导师信息/` — 295 个导师 md（按学院分子目录）
+  - `培养工作/` — 208 个通知/政策 md
+  - `招生工作/` — 119 个招生相关 md
+  - `研工工作/` — 103 个研工相关 md
+  - `研究生文件/` — 7 个规章制度 md
+- `files/` — 原始 PDF/DOCX 文件（不再扫描，仅供查阅）
+- 全量 732 md 文档已通过 chunker v2（1500 字符 + markdown 标题切分）→ BGE-M3 向量化 → 写入 Milvus + PG
 
 ## 实施阶段
 
 - [x] **P0** 基础设施：docker-compose + Milvus + PG + 占位 client + DeepSeek/MinerU 接入
-- [x] **P1** 数据接入管线：scanner + markdown_parser + chunker + embedder + milvus_writer + pipeline
+- [x] **P1** 数据接入管线：scanner（只扫 files_md/）+ markdown_parser + chunker（1500 字符+标题切分）+ embedder + milvus_writer + pipeline
 - [x] **P2** 检索层：Milvus hybrid search（dense + sparse RRF 融合）+ search/chat API
 - [x] **P3** LLM 增强：意图识别 + 代词消解 + 多轮对话 + SSE 流式问答
-- [x] **P4** Wiki 沉淀：Wiki 生成（v4-pro）+ Wiki 检索 + Wiki 管理 API
+- [x] **P4** Wiki 沉淀：Wiki 生成（v4-pro）+ Wiki 检索 + Wiki 管理 API + bwiki 风格 UI + 独立详情页
 - [x] **P5** Next.js 前端：3 Tab（检索/问答/Wiki）+ 元数据展示 + 流式思考过程 + 耗时卡片
-- [x] **P6** 全量摄入：810 文档 / 5699 chunks，全部 embedded
-- [ ] **P7** 加固（RAGAS 评测 + Reranker 优化 + 鉴权 UI + 监控）
-  - [x] Mentors 实体补全（793 导师，98.1% chunks 关联）
-  - [x] 会话管理 UI（CRUD + 侧边栏）
-  - [x] 意图 few-shot + confidence + 多问题拆解 + 长度控制
+- [x] **P6** 全量摄入：732 md 文档 / 3271 chunks，全部 embedded（chunker v2: 1500 字符+标题切分）
+- [ ] **P7** 加固（Wiki 重新生成 + Mentors 重建 + RAGAS 重测基线 + 错误处理 + 监控）
+  - [x] Chunker v2（1500 字符 + markdown 标题切分，chunks 5699→3271）
+  - [x] Scanner v2（只扫 files_md/，不再调 MinerU）
+  - [x] Milvus insert 后加 flush（防数据丢失）
+  - [x] stats_use_rag 评测开关（统计查询走 RAG 检索而非 SQL 聚合）
+  - [x] 导师信息汇总.md（294 位导师统计汇总，RAGAS 评测语料）
+  - [x] Reranker max_length=512→256 优化（19s→11.5s，已 RAGAS 验证不降召回）
+  - [x] 鉴权 UI（前端 login/register 页面 + authFetch 自动注入 Bearer token + 401 跳登录）
+  - [x] RAGAS 评测脚本适配 AUTH_DISABLED=false（自动登录 admin + BGE-M3 CPU 模式避免显存争抢）
+  - [x] langgraph 依赖移除（声明未用，精简依赖）
+  - [x] Dockerfile torch 改走清华镜像（避免绕开镜像直连 pytorch.org）
+  - [x] PG chunks 表补 page_num/char_start/char_end 字段（原文位置定位）
+  - [ ] Wiki 全量重新生成（旧数据因容器重启丢失，数据层任务非代码）
+  - [ ] Mentors 重建（依赖 wiki_entries，数据层任务非代码）
+  - [ ] RAGAS 重测基线（chunker v2 后检索效果可能变化，需运行评测脚本）
 
-> 项目完善计划详见 [.trae/documents/project-completion-plan.md](../.trae/documents/project-completion-plan.md)。当前数据摄入 810/810（全量完成）。
+> 项目完善计划详见 [.trae/documents/project-completion-plan.md](../.trae/documents/project-completion-plan.md)。当前数据摄入 732/732 md 文档（全量完成），wiki 待重新生成。
 
 ## API 接口一览
 
@@ -400,3 +492,27 @@ A: 已配置 `HF_ENDPOINT=https://hf-mirror.com`（国内镜像）。首次下�
 
 ### Q: MinerU 解析 PDF 失败？
 A: 检查 `.env` 的 `MINERU_API_TOKEN` 是否有效。可在 `.env` 中设置 `MINERU_USE_MOCK=true` 走 mock（返回占位文本），先测通 md 链路。
+
+### Q: 浏览器访问 localhost:3000 提示 `ERR_CONNECTION_REFUSED`？
+A: 通常是 Docker daemon 偶发重启导致容器在恢复中（后端加载 BGE-M3 模型需约 60-90 秒）。排查步骤：
+   1. 在 WSL2 内执行 `docker compose ps`，若容器状态为 `Up X seconds (health: starting)`，说明刚重启，等 90 秒后刷新即可。
+   2. 若容器为 `Exited`，执行 `docker compose up -d` 重新启动。
+   3. 若频繁重启，检查 `C:\Users\<用户名>\.wslconfig` 是否配置了 `vmIdleTimeout=86400000`（防止 WSL2 空闲回收）。
+   4. 确认 WSL2 在运行：Windows 终端执行 `wsl -l -v`，确保 Ubuntu 状态为 `Running`；若为 `Stopped`，执行 `wsl` 启动。
+   5. **重置方案**（已验证有效）：若 dockerd 频繁收到 SIGTERM 信号正常关闭、systemd `Restart=always` 拉起导致容器跟着反复重启（现象：`docker compose ps` 中 `Up X seconds` 的 X 一直在重置为个位数），在 Windows PowerShell 执行 `wsl --shutdown` 完全重置 WSL2 VM：
+      ```powershell
+      wsl --shutdown            # 关闭 WSL2（容器随之停止）
+      # 等待 10 秒后重新启动
+      wsl bash -c "echo started"  # 启动 WSL2，systemd 自动拉起 docker + 容器（restart: unless-stopped）
+      ```
+      启动后等待约 90 秒（docker daemon 启动 + BGE-M3 模型加载），再用 `docker compose ps` 验证容器状态稳定（`Up X minutes` 持续增长、RestartCount=0）。
+      > 实测结论：`wsl --shutdown` 后 WSL 启动最初几分钟内 dockerd 可能有 1-2 次初始化波动（PID 变化但 NRestarts=0），稳定后可持续运行 5 分钟以上无重启。容器 `restart: unless-stopped` 会自动恢复，偶发重启后等 30-60 秒即可重新访问。
+      > 根因：WSL2 长时间运行后 dockerd 可能偶发收到外部 SIGTERM 信号（无法用非 root 权限的 `journalctl -u docker` 进一步定位信号源），干净重启 WSL2 VM 可重置进程状态，显著降低重启频率。
+
+### Q: 前端页面返回 HTTP 500，日志报 `Cannot find module '@tailwindcss/typography'`？
+A: 容器内 `node_modules` 缺少依赖（匿名卷是旧版）。需重新构建前端镜像并重建匿名卷：
+   ```bash
+   docker compose build frontend
+   docker compose up -d --force-recreate --renew-anon-volumes frontend
+   ```
+   注意：Dockerfile 用 `npm install --legacy-peer-deps`（react-markdown v10 与 react 18 有 peer deps 冲突），**不要在运行中的容器内直接 `npm install`**（不带 `--legacy-peer-deps` 会破坏 node_modules 导致 Next.js 崩溃循环）。

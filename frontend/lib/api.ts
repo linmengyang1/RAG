@@ -4,8 +4,40 @@
  * 通过 next.config.js 的 rewrites 把 /api/* 转发到 backend，
  * 所以前端直接 fetch /api/v1/... 即可，无需处理 CORS。
  *
- * AUTH_DISABLED=true 时无需 token，否则需在 header 加 Authorization。
+ * 鉴权：所有请求经 authFetch 自动注入 Authorization: Bearer <token>。
+ * 401 时清除 token 并跳转 /login（见 authFetch）。
  */
+
+import { getToken, removeToken } from "./auth";
+
+/**
+ * 带 token 的 fetch 封装：自动注入 Authorization 头，401 跳登录页
+ *
+ * 用法：把原 fetch(...) 替换为 authFetch(...) 即可，参数完全兼容。
+ * 内部用 globalThis.fetch 避免与自身递归。
+ */
+export async function authFetch(
+  input: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  const token = getToken();
+  const headers = new Headers(init.headers);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const resp = await globalThis.fetch(input, { ...init, headers });
+  // token 失效或缺失：清除并跳登录页（避免在登录页本身跳转造成循环）
+  if (resp.status === 401) {
+    removeToken();
+    if (
+      typeof window !== "undefined" &&
+      !window.location.pathname.startsWith("/login")
+    ) {
+      window.location.href = "/login";
+    }
+  }
+  return resp;
+}
 
 // 检索方式选项
 export interface SearchOptions {
@@ -73,6 +105,8 @@ export interface ChatResponse {
   conversation_id: number;
   answer: string;
   sources: ChatSource[];
+  // 统计类 SQL 聚合结果（仅 intent==统计查询 时填充，供前端展示数字来源）
+  aggregates?: Record<string, unknown> | null;
 }
 
 // Wiki 条目
@@ -152,7 +186,7 @@ export async function searchApi(opts: SearchOptions): Promise<SearchResponse> {
   if (opts.enable_wiki !== undefined)
     params.set("enable_wiki", String(opts.enable_wiki));
 
-  const resp = await fetch(`/api/v1/search?${params.toString()}`, {
+  const resp = await authFetch(`/api/v1/search?${params.toString()}`, {
     method: "GET",
     headers: { "Content-Type": "application/json" },
   });
@@ -198,7 +232,7 @@ export async function listConversationsApi(
   const params = new URLSearchParams();
   params.set("page", String(page));
   params.set("page_size", String(pageSize));
-  const resp = await fetch(`/api/v1/conversations?${params.toString()}`);
+  const resp = await authFetch(`/api/v1/conversations?${params.toString()}`);
   if (!resp.ok) throw new Error(`获取会话列表失败: ${resp.status}`);
   return resp.json();
 }
@@ -207,7 +241,7 @@ export async function listConversationsApi(
 export async function getConversationApi(
   convId: number
 ): Promise<ConversationDetail> {
-  const resp = await fetch(`/api/v1/conversations/${convId}`);
+  const resp = await authFetch(`/api/v1/conversations/${convId}`);
   if (!resp.ok) throw new Error(`获取会话失败: ${resp.status}`);
   return resp.json();
 }
@@ -216,7 +250,7 @@ export async function getConversationApi(
 export async function deleteConversationApi(
   convId: number
 ): Promise<void> {
-  const resp = await fetch(`/api/v1/conversations/${convId}`, {
+  const resp = await authFetch(`/api/v1/conversations/${convId}`, {
     method: "DELETE",
   });
   if (!resp.ok) throw new Error(`删除会话失败: ${resp.status}`);
@@ -226,7 +260,7 @@ export async function deleteConversationApi(
  * 调用问答 API
  */
 export async function chatApi(req: ChatRequest): Promise<ChatResponse> {
-  const resp = await fetch("/api/v1/chat", {
+  const resp = await authFetch("/api/v1/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
@@ -266,7 +300,7 @@ export async function chatStreamApi(
   req: ChatRequest,
   callbacks: ChatStreamCallbacks
 ): Promise<void> {
-  const resp = await fetch("/api/v1/chat/stream", {
+  const resp = await authFetch("/api/v1/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
@@ -350,7 +384,7 @@ export async function listWikiApi(
   params.set("page", String(page));
   params.set("page_size", String(pageSize));
 
-  const resp = await fetch(`/api/v1/wiki?${params.toString()}`);
+  const resp = await authFetch(`/api/v1/wiki?${params.toString()}`);
   if (!resp.ok) {
     throw new Error(`Wiki 列表失败: ${resp.status}`);
   }
@@ -361,7 +395,7 @@ export async function listWikiApi(
  * Wiki 详情（含相关条目）
  */
 export async function getWikiApi(id: number): Promise<WikiItemDetail> {
-  const resp = await fetch(`/api/v1/wiki/${id}`);
+  const resp = await authFetch(`/api/v1/wiki/${id}`);
   if (!resp.ok) {
     throw new Error(`Wiki 详情失败: ${resp.status}`);
   }
@@ -379,7 +413,7 @@ export async function searchWikiApi(
   params.set("q", q);
   params.set("top_k", String(topK));
 
-  const resp = await fetch(`/api/v1/wiki/search?${params.toString()}`);
+  const resp = await authFetch(`/api/v1/wiki/search?${params.toString()}`);
   if (!resp.ok) {
     throw new Error(`Wiki 检索失败: ${resp.status}`);
   }
@@ -395,7 +429,7 @@ export async function listWikiCollegesApi(
   const params = new URLSearchParams();
   if (entryType) params.set("entry_type", entryType);
 
-  const resp = await fetch(`/api/v1/wiki/colleges?${params.toString()}`);
+  const resp = await authFetch(`/api/v1/wiki/colleges?${params.toString()}`);
   if (!resp.ok) {
     throw new Error(`获取学院列表失败: ${resp.status}`);
   }
@@ -409,7 +443,7 @@ export async function generateWikiApi(
   docIds?: number[],
   limit = 50
 ): Promise<{ generated: number; skipped: number; errors: number }> {
-  const resp = await fetch("/api/v1/wiki/generate", {
+  const resp = await authFetch("/api/v1/wiki/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ doc_ids: docIds, limit }),

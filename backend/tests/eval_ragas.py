@@ -59,12 +59,36 @@ def load_dataset(limit: int | None = None) -> list[dict]:
     return data
 
 
+def _get_auth_token() -> str:
+    """登录 admin 账号拿 JWT token，供 AUTH_DISABLED=false 时调用 /chat
+
+    AUTH_DISABLED=false 后 /chat 需要 Bearer token，否则返回 401。
+    用全局 _token_cache 避免每条 QA 重复登录。
+    """
+    global _token_cache
+    if _token_cache:
+        return _token_cache
+    login_resp = httpx.post(
+        f"{BACKEND_URL}/api/v1/auth/login",
+        json={"username": "admin", "password": "admin123"},
+        timeout=30,
+    )
+    login_resp.raise_for_status()
+    _token_cache = login_resp.json().get("access_token")
+    if not _token_cache:
+        raise RuntimeError("登录 admin 失败：响应无 access_token")
+    return _token_cache
+
+
+_token_cache: str | None = None
+
+
 def call_chat(
     question: str, top_k: int, enable_rerank: bool, enable_wiki: bool
 ) -> dict:
     """调用 backend /chat 端点，返回 {answer, sources, intent, elapsed}
 
-    AUTH_DISABLED=true 时免鉴权直接调用。
+    AUTH_DISABLED=false 时自动带 Bearer token（登录 admin/admin123）。
     超时设为 600s：rerank 30 候选约 36s + LLM 生成约 5-10s，留足余量。
     """
     payload = {
@@ -73,9 +97,10 @@ def call_chat(
         "enable_rerank": enable_rerank,
         "enable_wiki": enable_wiki,
     }
+    headers = {"Authorization": f"Bearer {_get_auth_token()}"}
     t0 = time.time()
     with httpx.Client(timeout=600) as client:
-        r = client.post(f"{BACKEND_URL}/api/v1/chat", json=payload)
+        r = client.post(f"{BACKEND_URL}/api/v1/chat", json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
     data["elapsed"] = time.time() - t0
@@ -110,14 +135,18 @@ def build_llm():
 
 
 def build_embeddings():
-    """构造 RAGAS 用的 Embeddings（本地 BGE-M3，复用 HF 缓存）
+    """构造 RAGAS 用的 Embeddings（本地 BGE-M3，CPU 模式）
 
     ragas 0.4+ 的 collections metrics 只支持 InstructorLLM 配套的 embeddings。
     用 ragas.embeddings.HuggingFaceEmbeddings（内部走 sentence-transformers）。
+
+    device="cpu"：强制 CPU 推理，避免与 backend 容器争抢 GTX 1660 SUPER 6GB 显存。
+    answer_relevancy 计算 question 和 response 的 embedding 相似度，CPU 上 BGE-M3
+    推理单条约 0.5-1s，50 条样本约 25-50s，可接受。
     """
     from ragas.embeddings import HuggingFaceEmbeddings as RagasHuggingFaceEmbeddings
 
-    return RagasHuggingFaceEmbeddings(model=settings.embed_model)
+    return RagasHuggingFaceEmbeddings(model=settings.embed_model, device="cpu")
 
 
 def run_ragas(samples: list[dict]) -> list[dict]:
@@ -144,14 +173,12 @@ def run_ragas(samples: list[dict]) -> list[dict]:
     llm = build_llm()
     embeddings = build_embeddings()
 
-    # 实例化 4 个 metric，AnswerRelevancy 设 strictness=1 避免 DeepSeek n>1 报错
+    # 4 个维度全开：前 3 个仅需 LLM，answer_relevancy 需 embeddings（CPU 模式）
     metrics = {
         "context_precision": ContextPrecision(llm=llm),
         "context_recall": ContextRecall(llm=llm),
         "faithfulness": Faithfulness(llm=llm),
-        "answer_relevancy": AnswerRelevancy(
-            llm=llm, embeddings=embeddings, strictness=1
-        ),
+        "answer_relevancy": AnswerRelevancy(llm=llm, embeddings=embeddings, strictness=1),
     }
 
     print(

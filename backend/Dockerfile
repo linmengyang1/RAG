@@ -19,9 +19,10 @@ COPY pyproject.toml ./
 # 注意 torch 必须先单独装 cu124 版本：默认 pip 装的 torch 2.12+cu130 需 CUDA 13.0 驱动，
 # 而宿主机 GTX 1660 驱动 552.44 仅支持 CUDA 12.4，会导致 torch.cuda.is_available()=False，
 # reranker 回退 CPU 推理（30 文档 50+ 秒）。cu124 版兼容 CUDA 12.4 驱动，可用 GPU 加速。
+# 清华镜像已包含 PyTorch CUDA 版本，不加 --index-url 避免绕开镜像直连 pytorch.org
 RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
     && pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
+    && pip install --no-cache-dir torch==2.5.1 \
     && pip install --no-cache-dir -e ".[gpu]"
 
 # ───────── 运行阶段 ─────────
