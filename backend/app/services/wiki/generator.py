@@ -200,7 +200,7 @@ async def generate_wiki_entries(
         prompt = WIKI_GEN_PROMPT.format(text=batch_text)
         try:
             resp = await get_llm_client().generate(
-                prompt, model=settings.deepseek_wiki_model  # wiki 用 v4-pro
+                prompt, model=settings.deepseek_wiki_model  # wiki 用 v4-flash
             )
             candidates = _parse_wiki_candidates(resp)
             # 标注来源 doc_ids（去重）

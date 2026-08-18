@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_api_base: str = "https://api.deepseek.com"
     deepseek_main_model: str = "deepseek-v4-flash"   # 主力（RAG 问答）
-    deepseek_wiki_model: str = "deepseek-v4-pro"     # Wiki 生成
+    deepseek_wiki_model: str = "deepseek-v4-flash"     # Wiki 生成
     llm_use_mock: bool = False
 
     # ───── MinerU ─────

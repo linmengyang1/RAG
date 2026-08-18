@@ -1,7 +1,9 @@
 """FastAPI 应用入口"""
 from __future__ import annotations
 
+import subprocess
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +11,41 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import api_router
 from app.core.config import settings
 from app.core.logging import logger, setup_logging
+
+# infra/scripts/init_milvus.py 在容器内挂载路径（docker-compose.yml: ./infra:/app/infra:ro）
+# 宿主机开发时用相对路径回退
+_INIT_MILVUS_SCRIPT = Path("/app/infra/scripts/init_milvus.py")
+if not _INIT_MILVUS_SCRIPT.exists():
+    _INIT_MILVUS_SCRIPT = Path(__file__).resolve().parents[2] / "infra" / "scripts" / "init_milvus.py"
+
+
+def _ensure_milvus_collections() -> None:
+    """幂等初始化 Milvus collection：若不存在则创建，已存在则跳过。
+
+    复用 infra/scripts/init_milvus.py 的幂等逻辑（has_collection 检查 + 不带 --force 不重建），
+    避免 backend 容器 down/up 重启后 chunks/wiki collection 丢失导致 collection not found。
+    """
+    if not _INIT_MILVUS_SCRIPT.exists():
+        logger.warning(f"Milvus 初始化脚本不存在: {_INIT_MILVUS_SCRIPT}，跳过自动初始化")
+        return
+    try:
+        # init_milvus.py 内部有 60s 等 Milvus 就绪 + 幂等创建 + load_collection 逻辑
+        result = subprocess.run(
+            ["python", str(_INIT_MILVUS_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode == 0:
+            # 只记最后一行关键信息，避免日志过长
+            last_line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "OK"
+            logger.info(f"Milvus collection 初始化完成: {last_line}")
+        else:
+            logger.error(f"Milvus collection 初始化失败: {result.stderr[-300:]}")
+    except subprocess.TimeoutExpired:
+        logger.error("Milvus collection 初始化超时（180s），跳过")
+    except Exception as e:
+        logger.error(f"Milvus collection 初始化异常: {e}")
 
 
 @asynccontextmanager
@@ -22,6 +59,10 @@ async def lifespan(app: FastAPI):
         logger.info(f"PostgreSQL 连接: {'OK' if ok else 'FAIL'}")
     except Exception as e:
         logger.error(f"PostgreSQL 连接失败: {e}")
+
+    # 幂等初始化 Milvus collection（不存在才创建，已存在跳过）
+    # 让 Milvus 像 PostgreSQL（init_postgres.sql）一样在容器启动时自动建表
+    _ensure_milvus_collections()
 
     yield
     logger.info("应用关闭")

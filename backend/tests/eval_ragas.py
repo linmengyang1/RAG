@@ -331,9 +331,9 @@ def write_report(args, samples: list[dict], all_scores: list[dict]) -> tuple[Pat
 def main():
     parser = argparse.ArgumentParser(description="RAGAS 评测脚本")
     parser.add_argument(
-        "--limit", type=int, default=5, help="评测 QA 数量上限（默认 5）"
+        "--limit", type=int, default=50, help="评测 QA 数量上限（默认 50，跑全量数据集）"
     )
-    parser.add_argument("--top-k", type=int, default=5, help="检索 top_k（默认 5）")
+    parser.add_argument("--top-k", type=int, default=15, help="检索 top_k（默认 15，候选集 min(max(top_k*2,30),50)）")
     parser.add_argument(
         "--rerank", dest="rerank", action="store_true", default=True, help="启用 rerank（默认）"
     )
