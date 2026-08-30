@@ -1,4 +1,3 @@
-
 # Graduate RAG
 
 研究生院知识库 RAG 系统 — 基于 DeepSeek API + MinerU API + Milvus 2.4 + 本地 BGE-M3 Embedding。
@@ -37,29 +36,29 @@ LLM 沉淀的知识条目列表，支持按类型（人物/政策/流程）筛�
 
 ## 技术栈
 
-| 层 | 选型 |
-|------|------|
-| LLM | DeepSeek API（v4-flash 主力 / v4-pro Wiki 生成） |
-| PDF 解析 | MinerU API（vlm 模型） |
-| 向量库 | Milvus 2.4 Standalone（Dense + Sparse 混合检索） |
+| 层         | 选型                                                  |
+| --------- | --------------------------------------------------- |
+| LLM       | DeepSeek API（v4-flash 主力 / v4-pro Wiki 生成）          |
+| PDF 解析    | MinerU API（vlm 模型）                                  |
+| 向量库       | Milvus 2.4 Standalone（Dense + Sparse 混合检索）          |
 | Embedding | BGE-M3（本地，GTX 1660 SUPER 6GB，1024 维 Dense + Sparse） |
-| Reranker | bge-reranker-v2-m3（本地，已启用） |
-| 元数据 | PostgreSQL 16 |
-| 鉴权 | JWT（HS256）+ 前端 authFetch 自动注入 Bearer |
-| 后端 | FastAPI + SQLAlchemy async |
-| 前端 | Next.js 14 + Tailwind CSS（已实现） |
+| Reranker  | bge-reranker-v2-m3（本地，已启用）                          |
+| 元数据       | PostgreSQL 16                                       |
+| 鉴权        | JWT（HS256）+ 前端 authFetch 自动注入 Bearer                |
+| 后端        | FastAPI + SQLAlchemy async                          |
+| 前端        | Next.js 14 + Tailwind CSS（已实现）                      |
 
 ## 端口规划（避开 Dify 占用）
 
-| 服务 | 宿主机端口 | 容器内端口 | 说明 |
-|------|-----------|-----------|------|
-| backend | **18000** | 8000 | FastAPI + Swagger |
-| postgres | **15432** | 5432 | PG（避开 Dify 的 5432） |
-| minio API | **19000** | 9000 | S3 API |
-| minio 控制台 | **19001** | 9001 | Web 控制台 |
-| milvus gRPC | 19530 | 19530 | 不冲突，保留 |
-| milvus 健康 | 9091 | 9091 | 不冲突，保留 |
-| frontend | **3000** | 3000 | Next.js Web UI（检索/问答/Wiki） |
+| 服务          | 宿主机端口     | 容器内端口 | 说明                         |
+| ----------- | --------- | ----- | -------------------------- |
+| backend     | **18000** | 8000  | FastAPI + Swagger          |
+| postgres    | **15432** | 5432  | PG（避开 Dify 的 5432）         |
+| minio API   | **19000** | 9000  | S3 API                     |
+| minio 控制台   | **19001** | 9001  | Web 控制台                    |
+| milvus gRPC | 19530     | 19530 | 不冲突，保留                     |
+| milvus 健康   | 9091      | 9091  | 不冲突，保留                     |
+| frontend    | **3000**  | 3000  | Next.js Web UI（检索/问答/Wiki） |
 
 ## 快速开始
 
@@ -69,7 +68,7 @@ LLM 沉淀的知识条目列表，支持按类型（人物/政策/流程）筛�
 2. Docker Engine（装在 WSL2 内，`systemctl enable docker` 设为开机自启）
 3. NVIDIA 显卡 + nvidia-container-toolkit（GPU 模式，见下方 [GPU 配置说明](#gpu-配置说明)）
 4. `../output/` 目录有数据（markdown + files）
-5. **`.wslconfig` 配置**（位于 `C:\Users\<用户名>\.wslconfig`，防止 WSL2 空闲回收导致容器反复重启）：
+5. **`.wslconfig`** **配置**（位于 `C:\Users\<用户名>\.wslconfig`，防止 WSL2 空闲回收导致容器反复重启）：
    ```ini
    [wsl2]
    vmIdleTimeout=86400000
@@ -123,7 +122,7 @@ curl -s http://localhost:18000/health
 # 预期: {"status":"ok","postgres":"ok","milvus":"ok",...}
 ```
 
-**在 Windows 浏览器访问**：http://localhost:3000 （首次打开页面有数秒编译延迟，属正常）
+**在 Windows 浏览器访问**：<http://localhost:3000> （首次打开页面有数秒编译延迟，属正常）
 
 **停止服务**：
 
@@ -136,10 +135,10 @@ docker compose down -v     # 停止并删除数据卷（慎用，会清空 Milvu
 
 ### 访问入口
 
-- **前端 Web UI：http://localhost:3000** （检索/问答/Wiki 三 Tab）
-- 后端 API 文档：http://localhost:18000/docs
-- 后端健康检查：http://localhost:18000/health
-- MinIO 控制台：http://localhost:19001 （minioadmin / minioadmin）
+- **前端 Web UI：<http://localhost:3000>** （检索/问答/Wiki 三 Tab）
+- 后端 API 文档：<http://localhost:18000/docs>
+- 后端健康检查：<http://localhost:18000/health>
+- MinIO 控制台：<http://localhost:19001> （minioadmin / minioadmin）
 - PostgreSQL（本机调试）：`psql -h localhost -p 15432 -U grad -d grad_rag`
 
 ### 登录凭据与 JWT 鉴权
@@ -147,7 +146,7 @@ docker compose down -v     # 停止并删除数据卷（慎用，会清空 Milvu
 当前 `.env` 中 `AUTH_DISABLED=false`（鉴权已开启），访问前端需登录：
 
 - 用户名：`admin`
-- 密码：`admin123`
+- 密码：`xxxxxx`
 
 鉴权采用 JWT（HS256）：登录后服务端签发 token，后续请求经 `Authorization: Bearer <token>` 头携带，由 `.env` 中的 `JWT_SECRET`（64 位随机串）完成签名与校验。重新生成密钥：
 
@@ -155,7 +154,7 @@ docker compose down -v     # 停止并删除数据卷（慎用，会清空 Milvu
 openssl rand -hex 32
 ```
 
-> 生产环境务必重新生成 JWT_SECRET，且不要提交到 git。
+> 生产环境务必重新生成 JWT\_SECRET，且不要提交到 git。
 
 如需关闭鉴权（仅本地内网测试），在 `.env` 中设置 `AUTH_DISABLED=true` 后重启 backend 容器，所有接口无需 Authorization 头。
 
@@ -251,7 +250,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:18000/api/v1/search?q=导师&top_k=5&category=导师信息"
 ```
 
-检索方式：Dense（HNSW + COSINE）+ Sparse（BM25）双路，RRF 融合，召回 K=max(top_k×6, 30) 候选集 → bge-reranker-v2-m3 精排（可选 `enable_rerank=true`），可选 wiki 第三路附加（`enable_wiki=true`）。每条结果含检索来源标签（向量/关键词/Wiki）+ 相似度 + 原文页码元数据（page_num/char_start/char_end）。
+检索方式：Dense（HNSW + COSINE）+ Sparse（BM25）双路，RRF 融合，召回 K=max(top\_k×6, 30) 候选集 → bge-reranker-v2-m3 精排（可选 `enable_rerank=true`），可选 wiki 第三路附加（`enable_wiki=true`）。每条结果含检索来源标签（向量/关键词/Wiki）+ 相似度 + 原文页码元数据（page\_num/char\_start/char\_end）。
 
 ### 3. 问答
 
@@ -262,7 +261,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   http://localhost:18000/api/v1/chat
 ```
 
-问答流程：意图识别（代词消解 + 意图分类，用 deepseek-v4-flash）→ 改写 query → 检索 top_k 相关 chunk（含 rerank）→ 拼接 context prompt（含历史 4 轮）→ 调 DeepSeek 生成答案 → 持久化多轮对话（Conversation/Message 表）→ 返回答案 + sources + rewritten_query + intent + conversation_id。
+问答流程：意图识别（代词消解 + 意图分类，用 deepseek-v4-flash）→ 改写 query → 检索 top\_k 相关 chunk（含 rerank）→ 拼接 context prompt（含历史 4 轮）→ 调 DeepSeek 生成答案 → 持久化多轮对话（Conversation/Message 表）→ 返回答案 + sources + rewritten\_query + intent + conversation\_id。
 
 支持多轮对话：携带 `conversation_id` 即可继续上一轮，系统自动拉历史 8 条做代词消解（"他/她/它"等指代消解）。返回的 `rewritten_query` 是消解后的查询，`intent` 是意图标签（8 类：导师查询/统计查询/政策咨询/流程办理/招生信息/学位管理/奖学金/其他）。意图识别带 8 个 few-shot 示例和 confidence 阈值（<0.5 回退"其他"）；包含多个子问题时自动拆解为独立子问题分别检索后由 LLM 合并答案；输出长度按问题复杂度自动控制（简单≤200字/中等≤500字/统计不限）。
 
@@ -270,7 +269,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ### 1. Chunk 切片（1500 字符 + markdown 标题切分）
 
-- **chunk_size=1500**：每个切片约 1500 字符（约 500 token），按 markdown `##`/`###` 标题优先切分
+- **chunk\_size=1500**：每个切片约 1500 字符（约 500 token），按 markdown `##`/`###` 标题优先切分
 - **overlap=300**：相邻切片有 300 字符重叠（20%），避免语义断裂
 - **标题优先**：先按 `##`/`###` 标题切分成 section，section 内按段落累积到 1500 字符
 - **位置跟踪**：每个 chunk 记录 `char_start/char_end`（原文字符位置）+ `page_num`（PDF 页码，md 为 None）
@@ -279,10 +278,10 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 ### 2. 双路检索 + RRF + Rerank
 
 - **Dense 路**：BGE-M3 1024 维向量，HNSW + COSINE
-- **Sparse 路**：BGE-M3 sparse 向量，SPARSE_INVERTED_INDEX + IP（等同 BM25）
+- **Sparse 路**：BGE-M3 sparse 向量，SPARSE\_INVERTED\_INDEX + IP（等同 BM25）
 - **RRF 融合**：Reciprocal Rank Fusion（k=60），公式 `score(d) = sum(1/(k+rank+1))`
-- **召回 K**：`search_limit = min(max(top_k * 2, 30), 50)`，默认 top_k=5 时每路召回 30 条候选
-- **Rerank**：bge-reranker-v2-m3 对候选集精排，输出 sigmoid 归一化分数，截断到 top_k
+- **召回 K**：`search_limit = min(max(top_k * 2, 30), 50)`，默认 top\_k=5 时每路召回 30 条候选
+- **Rerank**：bge-reranker-v2-m3 对候选集精排，输出 sigmoid 归一化分数，截断到 top\_k
 - **来源标注**：每条结果含 `retrieval_sources`（如 `["dense","sparse"]`），前端用三色标签展示
 
 ### 3. 意图识别 + 代词消解（多轮对话）
@@ -304,26 +303,26 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 - **技术栈**：Next.js 14 + React 18 + TypeScript + Tailwind CSS
 - **3 个 Tab**：
-  - **检索 Tab**：query/top_k/category/rerank/wiki 开关，结果卡片显示检索方式标签 + 相似度进度条 + 原文位置
-  - **问答 Tab**：多轮对话，显示 rewritten_query + intent + 答案 + sources
+  - **检索 Tab**：query/top\_k/category/rerank/wiki 开关，结果卡片显示检索方式标签 + 相似度进度条 + 原文位置
+  - **问答 Tab**：多轮对话，显示 rewritten\_query + intent + 答案 + sources
   - **Wiki Tab**：列表/检索 + 独立详情页（`/wiki/[id]`，支持 markdown 渲染 + 相关元数据）
 - **元数据展示**：每条结果卡片含：
   - 检索方式标签（向量检索=蓝 / 关键词检索=绿 / Wiki 沉淀=紫）
   - 相似度（rerank 分数优先，否则 RRF 分数）+ 进度条
-  - 原文位置（doc_id + 页码 + 字符范围）
+  - 原文位置（doc\_id + 页码 + 字符范围）
   - rerank 分数（如启用）
   - 分类/学院/学科
 
 ### 6. SSE 流式问答（POST /api/v1/chat/stream）
 
-- **分阶段推送**：intent_done → retrieving → retrieving_stage（4 个子阶段）→ retrieved → generating → token（多次）→ done
-- **检索子阶段拆分**：retrieving_stage 事件推送 4 个子阶段进度：
-  - `embedding`：BGE-M3 向量化查询（~1.2s）
-  - `dense`：向量检索（HNSW + COSINE，~0.4s）
-  - `sparse`：关键词检索（BM25，~0.0s）
-  - `reranking`：rerank 精排（bge-reranker-v2-m3，~36s，硬件瓶颈）
+- **分阶段推送**：intent\_done → retrieving → retrieving\_stage（4 个子阶段）→ retrieved → generating → token（多次）→ done
+- **检索子阶段拆分**：retrieving\_stage 事件推送 4 个子阶段进度：
+  - `embedding`：BGE-M3 向量化查询（\~1.2s）
+  - `dense`：向量检索（HNSW + COSINE，\~0.4s）
+  - `sparse`：关键词检索（BM25，\~0.0s）
+  - `reranking`：rerank 精排（bge-reranker-v2-m3，\~36s，硬件瓶颈）
 - **耗时显示**：每个 SSE 事件带 `elapsed_ms`（从请求开始累计），前端实时显示 + 完成后折叠卡片展示各阶段细分耗时
-- **关键技术**：hybrid_search 在 `asyncio.to_thread` 子线程运行，用 `asyncio.run_coroutine_threadsafe` 跨线程投递进度到主事件循环；Next.js 必须设置 `compress: false` 禁用 gzip（否则浏览器 reader.read() 解压阻塞，流式失效）
+- **关键技术**：hybrid\_search 在 `asyncio.to_thread` 子线程运行，用 `asyncio.run_coroutine_threadsafe` 跨线程投递进度到主事件循环；Next.js 必须设置 `compress: false` 禁用 gzip（否则浏览器 reader.read() 解压阻塞，流式失效）
 
 ## 前端使用
 
@@ -338,7 +337,7 @@ make frontend-logs        # 查看启动日志
 cd frontend && npm install && npm run dev
 ```
 
-访问 http://localhost:3000
+访问 <http://localhost:3000>
 
 ### API 代理
 
@@ -397,7 +396,7 @@ graduate-rag/
 ## 实施阶段
 
 - [x] **P0** 基础设施：docker-compose + Milvus + PG + 占位 client + DeepSeek/MinerU 接入
-- [x] **P1** 数据接入管线：scanner（只扫 files_md/）+ markdown_parser + chunker（1500 字符+标题切分）+ embedder + milvus_writer + pipeline
+- [x] **P1** 数据接入管线：scanner（只扫 files\_md/）+ markdown\_parser + chunker（1500 字符+标题切分）+ embedder + milvus\_writer + pipeline
 - [x] **P2** 检索层：Milvus hybrid search（dense + sparse RRF 融合）+ search/chat API
 - [x] **P3** LLM 增强：意图识别 + 代词消解 + 多轮对话 + SSE 流式问答
 - [x] **P4** Wiki 沉淀：Wiki 生成（v4-pro）+ Wiki 检索 + Wiki 管理 API + bwiki 风格 UI + 独立详情页
@@ -405,42 +404,42 @@ graduate-rag/
 - [x] **P6** 全量摄入：732 md 文档 / 3271 chunks，全部 embedded（chunker v2: 1500 字符+标题切分）
 - [ ] **P7** 加固（Wiki 重新生成 + Mentors 重建 + RAGAS 重测基线 + 错误处理 + 监控）
   - [x] Chunker v2（1500 字符 + markdown 标题切分，chunks 5699→3271）
-  - [x] Scanner v2（只扫 files_md/，不再调 MinerU）
+  - [x] Scanner v2（只扫 files\_md/，不再调 MinerU）
   - [x] Milvus insert 后加 flush（防数据丢失）
-  - [x] stats_use_rag 评测开关（统计查询走 RAG 检索而非 SQL 聚合）
+  - [x] stats\_use\_rag 评测开关（统计查询走 RAG 检索而非 SQL 聚合）
   - [x] 导师信息汇总.md（294 位导师统计汇总，RAGAS 评测语料）
-  - [x] Reranker max_length=512→256 优化（19s→11.5s，已 RAGAS 验证不降召回）
+  - [x] Reranker max\_length=512→256 优化（19s→11.5s，已 RAGAS 验证不降召回）
   - [x] 鉴权 UI（前端 login/register 页面 + authFetch 自动注入 Bearer token + 401 跳登录）
-  - [x] RAGAS 评测脚本适配 AUTH_DISABLED=false（自动登录 admin + BGE-M3 CPU 模式避免显存争抢）
-  - [x] RAGAS 评测数据集 v2 重建（50 条全部可答，ground_truth 取自真实 md，剔除旧版无对应文档的"学位工作"等问题）
+  - [x] RAGAS 评测脚本适配 AUTH\_DISABLED=false（自动登录 admin + BGE-M3 CPU 模式避免显存争抢）
+  - [x] RAGAS 评测数据集 v2 重建（50 条全部可答，ground\_truth 取自真实 md，剔除旧版无对应文档的"学位工作"等问题）
   - [x] langgraph 依赖移除（声明未用，精简依赖）
   - [x] Dockerfile torch 改走清华镜像（避免绕开镜像直连 pytorch.org）
-  - [x] PG chunks 表补 page_num/char_start/char_end 字段（原文位置定位）
+  - [x] PG chunks 表补 page\_num/char\_start/char\_end 字段（原文位置定位）
   - [ ] Wiki 全量重新生成（旧数据因容器重启丢失，数据层任务非代码）
-  - [ ] Mentors 重建（依赖 wiki_entries，数据层任务非代码）
-  - [ ] RAGAS 重测基线（数据集 v2 已就绪，待摄入导师汇总后运行 eval_ragas.py 建立 v6 基线）
+  - [ ] Mentors 重建（依赖 wiki\_entries，数据层任务非代码）
+  - [ ] RAGAS 重测基线（数据集 v2 已就绪，待摄入导师汇总后运行 eval\_ragas.py 建立 v6 基线）
 
 > 项目完善计划详见 [.trae/documents/project-completion-plan.md](../.trae/documents/project-completion-plan.md)。当前数据摄入 732/732 md 文档（全量完成），wiki 待重新生成。
 
 ## API 接口一览
 
-| 方法 | 路径 | 说明 | 鉴权 |
-|------|------|------|------|
-| GET | `/health` | 健康检查 | 否 |
-| GET | `/docs` | Swagger 文档 | 否 |
-| POST | `/api/v1/auth/register` | 注册管理员 | 否 |
-| POST | `/api/v1/auth/login` | 登录获取 token | 否 |
-| GET | `/api/v1/search?q=xxx` | 混合检索（含 rerank/wiki 开关） | 是 |
-| POST | `/api/v1/chat` | RAG 问答（多轮对话 + 意图识别） | 是 |
-| POST | `/api/v1/chat/stream` | RAG 流式问答（SSE 分阶段推送 + 检索子阶段拆分） | 是 |
-| POST | `/api/v1/wiki/generate` | 触发 Wiki 生成 | 是(admin) |
-| GET | `/api/v1/wiki` | Wiki 列表（分页 + 类型过滤） | 是 |
-| GET | `/api/v1/wiki/search?q=` | Wiki 检索 | 是 |
-| GET | `/api/v1/wiki/{id}` | Wiki 详情 | 是 |
-| GET | `/api/v1/conversations` | 会话列表（分页） | 是 |
-| GET | `/api/v1/conversations/{id}` | 会话详情（含历史消息） | 是 |
-| PATCH | `/api/v1/conversations/{id}` | 重命名会话 | 是 |
-| DELETE | `/api/v1/conversations/{id}` | 删除会话（CASCADE messages） | 是 |
+| 方法     | 路径                           | 说明                            | 鉴权       |
+| ------ | ---------------------------- | ----------------------------- | -------- |
+| GET    | `/health`                    | 健康检查                          | 否        |
+| GET    | `/docs`                      | Swagger 文档                    | 否        |
+| POST   | `/api/v1/auth/register`      | 注册管理员                         | 否        |
+| POST   | `/api/v1/auth/login`         | 登录获取 token                    | 否        |
+| GET    | `/api/v1/search?q=xxx`       | 混合检索（含 rerank/wiki 开关）        | 是        |
+| POST   | `/api/v1/chat`               | RAG 问答（多轮对话 + 意图识别）           | 是        |
+| POST   | `/api/v1/chat/stream`        | RAG 流式问答（SSE 分阶段推送 + 检索子阶段拆分） | 是        |
+| POST   | `/api/v1/wiki/generate`      | 触发 Wiki 生成                    | 是(admin) |
+| GET    | `/api/v1/wiki`               | Wiki 列表（分页 + 类型过滤）            | 是        |
+| GET    | `/api/v1/wiki/search?q=`     | Wiki 检索                       | 是        |
+| GET    | `/api/v1/wiki/{id}`          | Wiki 详情                       | 是        |
+| GET    | `/api/v1/conversations`      | 会话列表（分页）                      | 是        |
+| GET    | `/api/v1/conversations/{id}` | 会话详情（含历史消息）                   | 是        |
+| PATCH  | `/api/v1/conversations/{id}` | 重命名会话                         | 是        |
+| DELETE | `/api/v1/conversations/{id}` | 删除会话（CASCADE messages）        | 是        |
 
 ## 测试
 
@@ -455,37 +454,46 @@ make test-local
 ## 常见问题
 
 ### Q: `docker compose ps` 显示 backend 是 `unhealthy`？
+
 A: 检查日志 `docker compose logs backend`，常见原因：GPU 直通未配置（容器内 torch 检测不到 CUDA）、Milvus 未就绪、PG 未就绪。
 
 ### Q: 摄入时报 `FlagEmbedding` 导入失败？
+
 A: 镜像没装 `.[gpu]` 依赖。重新 `make build` 构建 backend 镜像。
 
 ### Q: BGE-M3 模型下载很慢？
+
 A: 已配置 `HF_ENDPOINT=https://hf-mirror.com`（国内镜像）。首次下载约 2.4GB，之后缓存在 `./models/` 目录，重启容器不用重下。
 
 ### Q: MinerU 解析 PDF 失败？
+
 A: 检查 `.env` 的 `MINERU_API_TOKEN` 是否有效。可在 `.env` 中设置 `MINERU_USE_MOCK=true` 走 mock（返回占位文本），先测通 md 链路。
 
 ### Q: 浏览器访问 localhost:3000 提示 `ERR_CONNECTION_REFUSED`？
+
 A: 通常是 Docker daemon 偶发重启导致容器在恢复中（后端加载 BGE-M3 模型需约 60-90 秒）。排查步骤：
-   1. 在 WSL2 内执行 `docker compose ps`，若容器状态为 `Up X seconds (health: starting)`，说明刚重启，等 90 秒后刷新即可。
-   2. 若容器为 `Exited`，执行 `docker compose up -d` 重新启动。
-   3. 若频繁重启，检查 `C:\Users\<用户名>\.wslconfig` 是否配置了 `vmIdleTimeout=86400000`（防止 WSL2 空闲回收）。
-   4. 确认 WSL2 在运行：Windows 终端执行 `wsl -l -v`，确保 Ubuntu 状态为 `Running`；若为 `Stopped`，执行 `wsl` 启动。
-   5. **重置方案**（已验证有效）：若 dockerd 频繁收到 SIGTERM 信号正常关闭、systemd `Restart=always` 拉起导致容器跟着反复重启（现象：`docker compose ps` 中 `Up X seconds` 的 X 一直在重置为个位数），在 Windows PowerShell 执行 `wsl --shutdown` 完全重置 WSL2 VM：
-      ```powershell
-      wsl --shutdown            # 关闭 WSL2（容器随之停止）
-      # 等待 10 秒后重新启动
-      wsl bash -c "echo started"  # 启动 WSL2，systemd 自动拉起 docker + 容器（restart: unless-stopped）
-      ```
-      启动后等待约 90 秒（docker daemon 启动 + BGE-M3 模型加载），再用 `docker compose ps` 验证容器状态稳定（`Up X minutes` 持续增长、RestartCount=0）。
-      > 实测结论：`wsl --shutdown` 后 WSL 启动最初几分钟内 dockerd 可能有 1-2 次初始化波动（PID 变化但 NRestarts=0），稳定后可持续运行 5 分钟以上无重启。容器 `restart: unless-stopped` 会自动恢复，偶发重启后等 30-60 秒即可重新访问。
-      > 根因：WSL2 长时间运行后 dockerd 可能偶发收到外部 SIGTERM 信号（无法用非 root 权限的 `journalctl -u docker` 进一步定位信号源），干净重启 WSL2 VM 可重置进程状态，显著降低重启频率。
+
+1. 在 WSL2 内执行 `docker compose ps`，若容器状态为 `Up X seconds (health: starting)`，说明刚重启，等 90 秒后刷新即可。
+2. 若容器为 `Exited`，执行 `docker compose up -d` 重新启动。
+3. 若频繁重启，检查 `C:\Users\<用户名>\.wslconfig` 是否配置了 `vmIdleTimeout=86400000`（防止 WSL2 空闲回收）。
+4. 确认 WSL2 在运行：Windows 终端执行 `wsl -l -v`，确保 Ubuntu 状态为 `Running`；若为 `Stopped`，执行 `wsl` 启动。
+5. **重置方案**（已验证有效）：若 dockerd 频繁收到 SIGTERM 信号正常关闭、systemd `Restart=always` 拉起导致容器跟着反复重启（现象：`docker compose ps` 中 `Up X seconds` 的 X 一直在重置为个位数），在 Windows PowerShell 执行 `wsl --shutdown` 完全重置 WSL2 VM：
+   ```powershell
+   wsl --shutdown            # 关闭 WSL2（容器随之停止）
+   # 等待 10 秒后重新启动
+   wsl bash -c "echo started"  # 启动 WSL2，systemd 自动拉起 docker + 容器（restart: unless-stopped）
+   ```
+   启动后等待约 90 秒（docker daemon 启动 + BGE-M3 模型加载），再用 `docker compose ps` 验证容器状态稳定（`Up X minutes` 持续增长、RestartCount=0）。
+   > 实测结论：`wsl --shutdown` 后 WSL 启动最初几分钟内 dockerd 可能有 1-2 次初始化波动（PID 变化但 NRestarts=0），稳定后可持续运行 5 分钟以上无重启。容器 `restart: unless-stopped` 会自动恢复，偶发重启后等 30-60 秒即可重新访问。
+   > 根因：WSL2 长时间运行后 dockerd 可能偶发收到外部 SIGTERM 信号（无法用非 root 权限的 `journalctl -u docker` 进一步定位信号源），干净重启 WSL2 VM 可重置进程状态，显著降低重启频率。
 
 ### Q: 前端页面返回 HTTP 500，日志报 `Cannot find module '@tailwindcss/typography'`？
+
 A: 容器内 `node_modules` 缺少依赖（匿名卷是旧版）。需重新构建前端镜像并重建匿名卷：
-   ```bash
-   docker compose build frontend
-   docker compose up -d --force-recreate --renew-anon-volumes frontend
-   ```
-   注意：Dockerfile 用 `npm install --legacy-peer-deps`（react-markdown v10 与 react 18 有 peer deps 冲突），**不要在运行中的容器内直接 `npm install`**（不带 `--legacy-peer-deps` 会破坏 node_modules 导致 Next.js 崩溃循环）。
+
+```bash
+docker compose build frontend
+docker compose up -d --force-recreate --renew-anon-volumes frontend
+```
+
+注意：Dockerfile 用 `npm install --legacy-peer-deps`（react-markdown v10 与 react 18 有 peer deps 冲突），**不要在运行中的容器内直接** **`npm install`**（不带 `--legacy-peer-deps` 会破坏 node\_modules 导致 Next.js 崩溃循环）。
