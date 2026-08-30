@@ -142,46 +142,22 @@ docker compose down -v     # 停止并删除数据卷（慎用，会清空 Milvu
 - MinIO 控制台：http://localhost:19001 （minioadmin / minioadmin）
 - PostgreSQL（本机调试）：`psql -h localhost -p 15432 -U grad -d grad_rag`
 
-### 登录凭据
+### 登录凭据与 JWT 鉴权
 
 当前 `.env` 中 `AUTH_DISABLED=false`（鉴权已开启），访问前端需登录：
 
 - 用户名：`admin`
 - 密码：`admin123`
 
-如需关闭鉴权（仅本地内网测试），在 `.env` 中设置 `AUTH_DISABLED=true` 后重启 backend 容器。
-
-## JWT_SECRET 是什么
-
-**JWT_SECRET** 是用于签发和验证 JWT（JSON Web Token）令牌的密钥，采用 HS256 对称加密算法。
-
-### 工作原理
-
-1. **用户登录**时，服务端用 JWT_SECRET 签名生成一个 token，返回给客户端
-2. **客户端请求**时携带 `Authorization: Bearer <token>` 头
-3. **服务端验证** token 时，用同一个 JWT_SECRET 验证签名是否有效
-
-### 生成方法
+鉴权采用 JWT（HS256）：登录后服务端签发 token，后续请求经 `Authorization: Bearer <token>` 头携带，由 `.env` 中的 `JWT_SECRET`（64 位随机串）完成签名与校验。重新生成密钥：
 
 ```bash
-# 生成 64 字符的随机十六进制串
 openssl rand -hex 32
-# 输出示例: d446f1720bfba0096777ad042fd80fbe15c2a68eb984a3789f27853d5dd25bc7
 ```
 
-### 当前状态
+> 生产环境务必重新生成 JWT_SECRET，且不要提交到 git。
 
-`.env` 中已预填一个随机生成的 JWT_SECRET（64 字符），可直接使用。**生产环境务必重新生成**，且不要提交到 git。
-
-### 关闭鉴权（仅本地内网）
-
-如果不想登录就能调接口，在 `.env` 中设置：
-
-```env
-AUTH_DISABLED=true
-```
-
-关闭后所有接口无需 Authorization 头，`get_current_user` 会返回一个虚拟 admin 用户。
+如需关闭鉴权（仅本地内网测试），在 `.env` 中设置 `AUTH_DISABLED=true` 后重启 backend 容器，所有接口无需 Authorization 头。
 
 ## GPU 配置说明
 
@@ -238,6 +214,24 @@ docker compose exec backend python -m app.cli.ingest --limit-md 100 --limit-pdf 
 ```
 
 摄入流程：扫描 `files_md/`（只收 `.md` 文件）→ 解析 md 元数据 → 切片（1500 字符 + markdown 标题切分）→ BGE-M3 向量化 → 写入 Milvus + PG。不再调用 MinerU API。
+
+如需清空重建（谨慎操作，会删除已有向量与元数据）：
+
+```bash
+# 1. 重建 Milvus 集合（drop + recreate）
+docker exec grad-rag-backend python /app/infra/scripts/init_milvus.py --force
+
+# 2. 清空 PG 数据
+docker exec grad-rag-postgres psql -U grad -d grad_rag -c \
+  "TRUNCATE chunks RESTART IDENTITY CASCADE; TRUNCATE documents RESTART IDENTITY CASCADE; TRUNCATE wiki_entries RESTART IDENTITY CASCADE;"
+
+# 3. 全量摄入（纯 md 解析，不调 MinerU，约 10 分钟）
+docker exec -d grad-rag-backend bash -c \
+  'cd /app/backend && nohup python -m app.cli.ingest > /tmp/ingest.log 2>&1'
+
+# 4. 查看进度
+docker exec grad-rag-backend bash -c 'tail -n 10 /tmp/ingest.log'
+```
 
 ### 2. 检索
 
@@ -355,79 +349,6 @@ cd frontend && npm install && npm run dev
 当前 `.env` 中 `AUTH_DISABLED=false`（鉴权已开启）。前端通过 `lib/auth.ts` + `lib/auth-context.tsx` 管理 token，所有请求经 `api.ts` 的 `authFetch` 自动注入 `Authorization: Bearer <token>`，401 自动清除 token 并跳转 `/login`。登录/注册页面在 `app/login/` 和 `app/register/`。
 
 如需临时关闭鉴权（仅本地内网测试），在 `.env` 中设置 `AUTH_DISABLED=true` 后重启 backend 容器，此时 `authFetch` 不注入 token 也能正常访问。
-
-## 数据摄入状态
-
-全量 md 文件已摄入完成（732 文档 / 3271 chunks）。所有文件由 MinerU 预先解析为 md 格式，存放在 `output/files_md/`，scanner 只扫描 `.md` 文件，不再调用 MinerU API。
-
-另有 1 份 `导师信息汇总.md`（294 位导师统计汇总，document id=297，37 chunks，已摄入）用于 RAGAS 评测时统计查询走 RAG 检索（STATS_USE_RAG=true）。
-
-### RAGAS 评测数据集（v2，2026-08-17 重建）
-
-`backend/tests/eval_dataset.json` 已重建为 50 条**全部可答**的评测问题。旧版 50 条存在大量"答案不在 chunks 中"的问题（指向不存在的"学位工作"分类，以及学籍管理/学位授予细则/论文查重/开题报告/中期考核/实验室安全等无对应文档的主题），导致 faithfulness 虚高、context_precision/recall/answer_relevancy 偏低。
-
-v2 每条问题的 ground_truth 均从 `output/files_md/` 真实 md 提取并核对，覆盖 8 类意图：
-
-| 意图 | 条数 | 数据来源（真实 md） |
-|------|------|---------------------|
-| 导师查询 | 9 | 导师信息/（段晓东等采集表） |
-| 统计查询 | 4 | 导师信息/ 各学院导师清单 |
-| 政策咨询 | 6 | 研工工作/违纪处分办法 + 研究生文件/奖助体系实施办法 |
-| 流程办理 | 7 | 招生工作/复试方案 + 研究生文件/三助一辅 + 培养工作/评教通知 |
-| 招生信息 | 8 | 招生工作/招生章程 + 复试方案 |
-| 学位管理 | 5 | 培养工作/答辩公告 + 违纪处分（学术不端条款） |
-| 奖学金 | 7 | 研究生文件/奖助体系实施办法 |
-| 其他 | 4 | 培养工作/课程安排表 + 评教通知 |
-
-重跑基线前需确保：导师信息/招生章程/复试方案/奖助体系实施办法/违纪处分办法/答辩公告/课程安排表 均已摄入 Milvus。
-
-| 表 | 数量 | 说明 |
-|----|------|------|
-| documents | **732** | 全量 md 摄入完成，全部 status=embedded（+1 待摄入） |
-| chunks | **3271** | 全量向量化完成，已入 Milvus |
-| wiki_entries | **0** | 待重新生成（旧 wiki 因容器重启丢失，需重跑 gen_wiki） |
-| mentors | **0** | 待重新构建（依赖 wiki_entries） |
-| conversations | 3 | 会话历史（测试数据） |
-| messages | 84 | 对话消息 |
-
-### documents 分类分布
-
-| 分类 | 文档数 | 占比 |
-|------|--------|------|
-| 导师信息 | 295 | 40.3% |
-| 培养工作 | 208 | 28.4% |
-| 招生工作 | 119 | 16.3% |
-| 研工工作 | 103 | 14.1% |
-| 研究生文件 | 7 | 1.0% |
-| **总计** | **732** | 100% |
-
-### chunk 切分参数
-
-| 参数 | 值 | 说明 |
-|------|------|------|
-| CHUNK_SIZE | 1500 字符 | 约 500 token，BGE-M3 最大 8192 token |
-| CHUNK_OVERLAP | 300 字符 | 20% 重叠 |
-| 切分策略 | markdown 标题优先 | 按 `##`/`###` 切 section，section 内段落累积 |
-
-详见 [docs/chunk-strategy.md](docs/chunk-strategy.md)。
-
-### 重新摄入
-
-```bash
-# 1. 重建 Milvus 集合（drop + recreate）
-docker exec grad-rag-backend python /app/infra/scripts/init_milvus.py --force
-
-# 2. 清空 PG 数据
-docker exec grad-rag-postgres psql -U grad -d grad_rag -c \
-  "TRUNCATE chunks RESTART IDENTITY CASCADE; TRUNCATE documents RESTART IDENTITY CASCADE; TRUNCATE wiki_entries RESTART IDENTITY CASCADE;"
-
-# 3. 全量摄入（纯 md 解析，不调 MinerU，约 10 分钟）
-docker exec -d grad-rag-backend bash -c \
-  'cd /app/backend && nohup python -m app.cli.ingest > /tmp/ingest.log 2>&1'
-
-# 4. 查看进度
-docker exec grad-rag-backend bash -c 'tail -n 10 /tmp/ingest.log'
-```
 
 ## 目录结构
 
