@@ -3,6 +3,38 @@
 
 研究生院知识库 RAG 系统 — 基于 DeepSeek API + MinerU API + Milvus 2.4 + 本地 BGE-M3 Embedding。
 
+## 界面预览
+
+### 主页面
+
+登录后的主界面，顶部可在「问答 / 检索 / Wiki」三个 Tab 间切换，右上角显示当前用户并可登出。
+
+![主页面](docs/screenshots/home.png)
+
+### 问答界面
+
+多轮 RAG 问答：展示改写后的查询、意图标签、思考过程各阶段精确耗时（意图识别/向量化/双路检索/rerank/LLM 生成），引用来源默认折叠，点击标题可展开完整来源卡片。
+
+![问答界面](docs/screenshots/chat.png)
+
+### 检索界面
+
+纯检索调试工具：dense + sparse 双路 RRF 融合 + 可选 rerank / wiki 第三路，结果卡片含检索方式标签、相似度进度条与原文位置（页码/字符区间）。
+
+![检索界面](docs/screenshots/search.png)
+
+### Wiki 界面
+
+LLM 沉淀的知识条目列表，支持按类型（人物/政策/流程）筛选与按学院分组导航。
+
+![Wiki 界面](docs/screenshots/wiki.png)
+
+### Wiki 详情界面
+
+条目正文以 markdown 渲染，底部附相关条目双向链接（同学院/同方向/相关导师）。
+
+![Wiki 详情界面](docs/screenshots/wiki-detail.png)
+
 ## 技术栈
 
 | 层 | 选型 |
