@@ -38,6 +38,9 @@ data/
 mineru_cache/
 huggingface_cache/
 
+# 备份数据（含用户表/业务数据，严禁入库；只提交备份脚本）
+backups/
+
 # 模型权重（reranker/embedder，体积大，不入库）
 models/
 
