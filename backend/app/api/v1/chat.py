@@ -736,6 +736,11 @@ async def chat_stream(
         def elapsed_ms() -> int:
             return int((time.monotonic() - t0) * 1000)
 
+        # 各阶段精确耗时（ms），随 done 事件整体下发，前端直接展示不再自行减法
+        # 键：intent / retrieve_embedding / retrieve_dense / retrieve_sparse /
+        #     retrieve_rerank / llm / stats / multi
+        stage_times: dict[str, int] = {}
+
         try:
             # 1. 解析/创建 conversation
             if req.conversation_id:
@@ -775,7 +780,9 @@ async def chat_stream(
             ]
 
             # 4. 意图识别 + query 改写（代词消解）+ 多问题检测
+            t_stage = time.monotonic()
             intent_result = await recognize_intent(req.question, history)
+            stage_times["intent"] = int((time.monotonic() - t_stage) * 1000)
             rewritten_query = intent_result["rewritten_query"]
             intent = intent_result["intent"]
             sub_questions = intent_result.get("sub_questions") or []
@@ -790,12 +797,15 @@ async def chat_stream(
             # 多问题拆解：降级为非流式处理
             if sub_questions and len(sub_questions) > 1:
                 yield _sse("retrieving", {"elapsed_ms": elapsed_ms()})
+                t_stage = time.monotonic()
                 answer, results, trace = await _handle_multi_questions(
                     sub_questions=sub_questions,
                     history=history,
                     top_k=req.top_k,
                     db=db,
                 )
+                # 多问题路径的检索+生成在内部交织，统一计入拆解处理耗时
+                stage_times["multi"] = int((time.monotonic() - t_stage) * 1000)
                 yield _sse("retrieved", {
                     "sources_count": len(results),
                     "elapsed_ms": elapsed_ms(),
@@ -805,6 +815,7 @@ async def chat_stream(
             elif intent == STATS_INTENT and not settings.stats_use_rag:
                 # SQL 聚合路径（默认行为）
                 yield _sse("retrieving", {"elapsed_ms": elapsed_ms()})
+                t_stage = time.monotonic()
                 answer, results, trace = await _handle_stats_query(
                     rewritten_query=rewritten_query,
                     intent=intent,
@@ -812,6 +823,8 @@ async def chat_stream(
                     top_k=req.top_k,
                     db=db,
                 )
+                # 统计路径的聚合+LLM 润色在内部完成，统一计入统计耗时
+                stage_times["stats"] = int((time.monotonic() - t_stage) * 1000)
                 yield _sse("retrieved", {
                     "sources_count": len(results),
                     "elapsed_ms": elapsed_ms(),
@@ -827,11 +840,13 @@ async def chat_stream(
                 loop = asyncio.get_running_loop()
                 progress_queue: asyncio.Queue = asyncio.Queue()
 
-                def progress_callback(stage: str):
-                    """从子线程安全投递检索阶段进度到主事件循环"""
-                    asyncio.run_coroutine_threadsafe(progress_queue.put(stage), loop)
+                def progress_callback(stage: str, duration_ms: int):
+                    """从子线程安全投递检索阶段耗时到主事件循环（阶段完成后调用）"""
+                    asyncio.run_coroutine_threadsafe(
+                        progress_queue.put((stage, duration_ms)), loop
+                    )
 
-                # 启动检索任务（并发运行，期间可继续 yield SSE 推送子阶段进度）
+                # 启动检索任务（并发运行，期间可继续 yield SSE 推送子阶段耗时）
                 search_task = asyncio.create_task(
                     asyncio.to_thread(
                         hybrid_search,
@@ -843,7 +858,7 @@ async def chat_stream(
                     )
                 )
 
-                # 持续读取子阶段进度，推送 retrieving_stage 事件
+                # 持续读取子阶段耗时，推送 retrieving_stage 事件
                 while not search_task.done():
                     get_task = asyncio.create_task(progress_queue.get())
                     done, _ = await asyncio.wait(
@@ -851,9 +866,11 @@ async def chat_stream(
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if get_task in done:
-                        sub_stage = get_task.result()
+                        sub_stage, sub_duration = get_task.result()
+                        stage_times[f"retrieve_{sub_stage}"] = sub_duration
                         yield _sse("retrieving_stage", {
                             "stage": sub_stage,
+                            "duration_ms": sub_duration,
                             "elapsed_ms": elapsed_ms(),
                         })
                     else:
@@ -861,9 +878,11 @@ async def chat_stream(
 
                 # 排空 queue 剩余进度（search_task 完成后可能还有未读的回调）
                 while not progress_queue.empty():
-                    sub_stage = progress_queue.get_nowait()
+                    sub_stage, sub_duration = progress_queue.get_nowait()
+                    stage_times[f"retrieve_{sub_stage}"] = sub_duration
                     yield _sse("retrieving_stage", {
                         "stage": sub_stage,
+                        "duration_ms": sub_duration,
                         "elapsed_ms": elapsed_ms(),
                     })
 
@@ -886,6 +905,7 @@ async def chat_stream(
                     )
                     yield _sse("generating", {"elapsed_ms": elapsed_ms()})
                     answer_parts: list[str] = []
+                    t_stage = time.monotonic()
                     async for delta in get_llm_client().chat_stream(
                         [{"role": "user", "content": prompt}],
                         model=settings.deepseek_main_model,
@@ -893,6 +913,7 @@ async def chat_stream(
                         answer_parts.append(delta)
                         yield _sse("token", {"delta": delta})
                     answer = "".join(answer_parts)
+                    stage_times["llm"] = int((time.monotonic() - t_stage) * 1000)
 
             # 7. 写 assistant message（含 trace）
             # 统计类的 trace 已由 _handle_stats_query 返回，非统计类在此构建
@@ -926,9 +947,10 @@ async def chat_stream(
                 f"answer_len={len(answer)}"
             )
 
-            # 8. done（含完整 sources 供前端展示）
+            # 8. done（含完整 sources 供前端展示 + 各阶段精确耗时）
             yield _sse("done", {
                 "elapsed_ms": elapsed_ms(),
+                "stage_times": stage_times,
                 "conversation_id": conv.id,
                 "intent": intent,
                 "rewritten_query": rewritten_query,

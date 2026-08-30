@@ -13,6 +13,8 @@ RRF 公式：score(d) = sum( 1 / (k + rank_i(d)) )，k 默认 60
 """
 from __future__ import annotations
 
+import time
+
 from typing import Callable, Optional
 
 from app.core.config import settings
@@ -30,7 +32,7 @@ def hybrid_search(
     category: Optional[str] = None,
     enable_rerank: bool = True,
     enable_wiki: bool = False,
-    progress_callback: Optional[Callable[[str], None]] = None,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> list[dict]:
     """混合检索：dense + sparse（+ 可选 wiki），RRF 融合，可选 rerank
 
@@ -40,8 +42,9 @@ def hybrid_search(
         category: 可选分类过滤（如 "导师信息"）
         enable_rerank: 是否启用 rerank 精排（候选数 > top_k 时生效）
         enable_wiki: 是否启用 wiki 第三路检索
-        progress_callback: 可选回调，检索进入新阶段时调用（传阶段名：
-            "embedding" / "dense" / "sparse" / "reranking"），用于 SSE 流式推送进度
+        progress_callback: 可选回调，每个检索阶段**完成后**调用（参数：
+            (阶段名, 该阶段耗时毫秒)），阶段名为 "embedding" / "dense" /
+            "sparse" / "rerank"，用于 SSE 流式推送精确的分阶段耗时
 
     Returns:
         结果列表，每个元素是 dict：
@@ -64,10 +67,15 @@ def hybrid_search(
     if not query or not query.strip():
         return []
 
+    # 阶段完成回调：携带该阶段精确耗时（ms），供 SSE 推送前端展示
+    def notify_done(stage: str, start: float) -> None:
+        if progress_callback:
+            progress_callback(stage, int((time.monotonic() - start) * 1000))
+
     # 1. 向量化查询
-    if progress_callback:
-        progress_callback("embedding")
+    t_stage = time.monotonic()
     embeddings = embed([query])
+    notify_done("embedding", t_stage)
     query_dense = embeddings[0].dense
     query_sparse = embeddings[0].sparse
 
@@ -94,8 +102,7 @@ def hybrid_search(
     )
 
     # 2. dense 检索（HNSW + COSINE）
-    if progress_callback:
-        progress_callback("dense")
+    t_stage = time.monotonic()
     dense_results = client.search(
         collection_name=collection,
         data=[query_dense],
@@ -104,10 +111,10 @@ def hybrid_search(
         filter=filter_expr,
         output_fields=output_fields,
     )
+    notify_done("dense", t_stage)
 
     # 3. sparse 检索（SPARSE_INVERTED_INDEX + IP）
-    if progress_callback:
-        progress_callback("sparse")
+    t_stage = time.monotonic()
     sparse_results = client.search(
         collection_name=collection,
         data=[query_sparse],
@@ -116,6 +123,7 @@ def hybrid_search(
         filter=filter_expr,
         output_fields=output_fields,
     )
+    notify_done("sparse", t_stage)
 
     # 4. RRF 融合 + 记录每条命中来源
     rrf_scores: dict[int, float] = {}       # milvus_id -> rrf_score
@@ -153,8 +161,7 @@ def hybrid_search(
     # 6. 可选 rerank：对候选集做精排
     rerank_applied = False
     if enable_rerank and len(candidate_items) > top_k:
-        if progress_callback:
-            progress_callback("reranking")
+        t_stage = time.monotonic()
         try:
             from app.services.retrieval.reranker import rerank
             texts = [entity_map[mid].get("text", "") for mid in candidate_items]
@@ -168,6 +175,7 @@ def hybrid_search(
             logger.warning(f"rerank 失败，回退到 RRF 排序: {e}")
             candidate_items = sorted_ids[:top_k]
             rerank_scores_map = {}
+        notify_done("rerank", t_stage)
     else:
         candidate_items = candidate_items[:top_k]
         rerank_scores_map = {}

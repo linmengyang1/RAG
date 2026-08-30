@@ -127,8 +127,8 @@ function HomeContent() {
                 onClick={() => handleTabChange(t.id)}
                 className={`px-4 py-3 text-sm border-b-2 transition-all flex items-center gap-2 ${
                   tab === t.id
-                    ? "border-brand-600 text-brand-700 font-medium"
-                    : "border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50"
+                    ? "border-brand-600 text-brand-700 font-medium bg-brand-50/50 rounded-t-lg"
+                    : "border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50 rounded-t-lg"
                 }`}
               >
                 <svg
@@ -152,7 +152,7 @@ function HomeContent() {
       </nav>
 
       {/* Tab 描述条 */}
-      <div className="bg-gradient-to-r from-brand-50 to-accent-50 border-b border-slate-200">
+      <div className="bg-gradient-to-r from-brand-50 via-accent-50 to-brand-50 border-b border-slate-200">
         <div className="max-w-5xl mx-auto px-4 py-2 text-xs text-slate-600">
           <span className="text-slate-400">当前模式：</span>
           {TABS.find((t) => t.id === tab)?.desc}

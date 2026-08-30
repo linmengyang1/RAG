@@ -275,13 +275,16 @@ export async function chatApi(req: ChatRequest): Promise<ChatResponse> {
 export interface ChatStreamCallbacks {
   onIntent: (intent: string, rewrittenQuery: string, elapsedMs: number) => void;
   onRetrieving: (elapsedMs: number) => void;
-  // 检索子阶段进度：stage 为 "embedding"/"dense"/"sparse"/"reranking"
-  onRetrievingStage: (stage: string, elapsedMs: number) => void;
+  // 检索子阶段耗时：stage 为 "embedding"/"dense"/"sparse"/"rerank"，
+  // durationMs 为该阶段实际耗时（后端在阶段完成后回调）
+  onRetrievingStage: (stage: string, durationMs: number, elapsedMs: number) => void;
   onRetrieved: (count: number, elapsedMs: number) => void;
   onGenerating: (elapsedMs: number) => void;
   onToken: (delta: string) => void;
   onDone: (data: {
     elapsed_ms: number;
+    // 各阶段精确耗时（ms），由后端直接下发，前端无需再做减法
+    stage_times: Record<string, number>;
     conversation_id: number;
     intent: string;
     rewritten_query: string;
@@ -347,7 +350,7 @@ export async function chatStreamApi(
           callbacks.onRetrieving(parsed.elapsed_ms ?? 0);
           break;
         case "retrieving_stage":
-          callbacks.onRetrievingStage(parsed.stage, parsed.elapsed_ms ?? 0);
+          callbacks.onRetrievingStage(parsed.stage, parsed.duration_ms ?? 0, parsed.elapsed_ms ?? 0);
           break;
         case "retrieved":
           callbacks.onRetrieved(parsed.sources_count, parsed.elapsed_ms ?? 0);
